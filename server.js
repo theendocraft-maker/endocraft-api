@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const app = express();
+const { rollRarity, buildRarityPromptModifier } = require('./rarity');
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -15,20 +16,43 @@ app.get('/health', (req, res) => {
 });
 
 app.post('/api/chat', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+
+  if (!apiKey) {
+    return res.status(500).json({ error: 'API key not configured' });
+  }
+
+  // 🎲 Rarity-Roll passiert HIER, bevor Claude aufgerufen wird
+  const { rarity, visibleRoll } = rollRarity();
+  const rarityModifier = buildRarityPromptModifier(rarity);
+
+  // Rarity-Anweisung wird oben in den System-Prompt injiziert
+  const modifiedBody = {
+    ...req.body,
+    system: `${rarityModifier}\n\n${req.body.system || ''}`
+  };
+
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_KEY,
+        'x-api-key': apiKey,
         'anthropic-version': '2023-06-01'
       },
-      body: JSON.stringify(req.body)
+      body: JSON.stringify(modifiedBody)
     });
+
     const data = await response.json();
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+
+    // Rarity + Roll mit in die Response packen
+    res.status(response.status).json({
+      ...data,
+      rarity,
+      visible_roll: visibleRoll
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
