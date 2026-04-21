@@ -1,7 +1,17 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const app = express();
 const { rollRarity, buildRarityPromptModifier } = require('./rarity');
+
+// Deterministic slug from email — 16 hex chars of sha256(lowercase trimmed email)
+// Same algorithm as the SQL backfill, so existing + new cards match
+function emailToSlug(email){
+  return crypto.createHash('sha256')
+    .update(String(email || '').toLowerCase().trim())
+    .digest('hex')
+    .slice(0, 16);
+}
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
@@ -189,8 +199,10 @@ app.post('/api/save-card', async (req, res) => {
     }
 
     // 2) Insert the card — Postgres assigns `number` via BIGSERIAL, trigger sets `misprint_number` if rarity='misprint'
+    const ownerSlug = emailToSlug(email);
     const body = {
       email: email.toLowerCase().trim(),
+      owner_slug: ownerSlug,
       session_title: card.session_title || null,
       legendary_moment: card.legendary_moment || null,
       character_name: card.character_name || null,
@@ -230,11 +242,61 @@ app.post('/api/save-card', async (req, res) => {
         misprint_number: saved.misprint_number,   // null for non-misprint, sequential for misprints
         rarity: saved.rarity,
         email: saved.email,
+        owner_slug: ownerSlug,                    // client uses this for /my-cards/[slug] URL
         created_at: saved.created_at
       }
     });
   } catch (err) {
     console.error('Save-card handler error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// /my-cards — fetch all cards for an owner_slug (semi-private: only those who have the slug can view)
+app.get('/api/my-cards', async (req, res) => {
+  try {
+    const slug = (req.query.slug || '').trim();
+    if (!slug || !/^[a-f0-9]{16}$/i.test(slug)) {
+      return res.status(400).json({ error: 'Valid slug required' });
+    }
+    if (!SUPABASE_URL || !SUPABASE_KEY) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+    // Query via service_role (bypasses RLS, but filtered by slug)
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/cards?owner_slug=eq.${encodeURIComponent(slug)}&select=id,number,misprint_number,session_title,legendary_moment,character_name,character_class,rarity,visible_roll,image_url,created_at&order=created_at.desc`,
+      {
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('my-cards fetch error:', response.status, errText);
+      return res.status(500).json({ error: 'Failed to load cards' });
+    }
+    const cards = await response.json();
+    // Don't leak emails to the public — only serve the sanitized card records above
+    res.setHeader('Cache-Control', 'private, max-age=10');
+    res.json({ ok: true, cards: Array.isArray(cards) ? cards : [] });
+  } catch (err) {
+    console.error('my-cards handler error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Helper endpoint: convert email → slug (for returning users who know their email but not the slug)
+app.post('/api/my-cards/lookup', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ error: 'Valid email required' });
+    }
+    const slug = emailToSlug(email);
+    res.json({ ok: true, slug });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
