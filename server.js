@@ -239,4 +239,27 @@ app.post('/api/save-card', async (req, res) => {
   }
 });
 
+// Public subscriber count — backend proxies the count since RLS now locks direct SELECT
+app.get('/api/subscriber-count', async (req, res) => {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_KEY) return res.json({ count: 0 });
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/subscribers?select=email&limit=1`, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': 'count=exact',
+        'Range-Unit': 'items',
+        'Range': '0-0'
+      }
+    });
+    const cr = r.headers.get('content-range');
+    const total = parseInt((cr || '0-0/0').split('/')[1], 10) || 0;
+    res.setHeader('Cache-Control', 'public, max-age=60'); // 1-minute CDN cache
+    res.json({ count: total });
+  } catch (err) {
+    console.error('subscriber-count error:', err);
+    res.json({ count: 0 });
+  }
+});
+
 app.listen(PORT, () => console.log(`EndoCraft API running on port ${PORT}`));
