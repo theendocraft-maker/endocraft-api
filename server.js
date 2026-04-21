@@ -10,9 +10,11 @@ const AIML_KEY = process.env.AIML_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const PORT = process.env.PORT || 8080;
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'EndoCraft API' });
 });
+
 app.post('/api/chat', async (req, res) => {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -21,7 +23,6 @@ app.post('/api/chat', async (req, res) => {
   // 🎲 Rarity-Roll passiert HIER, bevor Claude aufgerufen wird
   const { rarity, visibleRoll } = rollRarity();
   const rarityModifier = buildRarityPromptModifier(rarity);
-  // Rarity-Anweisung wird oben in den System-Prompt injiziert
   const modifiedBody = {
     ...req.body,
     system: `${rarityModifier}\n\n${req.body.system || ''}`
@@ -37,7 +38,6 @@ app.post('/api/chat', async (req, res) => {
       body: JSON.stringify(modifiedBody)
     });
     const data = await response.json();
-    // Rarity + Roll mit in die Response packen
     res.status(response.status).json({
       ...data,
       rarity,
@@ -47,6 +47,7 @@ app.post('/api/chat', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
 app.post('/api/image', async (req, res) => {
   try {
     const { prompt, model = 'flux-pro', width, height, aspect_ratio } = req.body;
@@ -81,6 +82,7 @@ app.post('/api/image', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 app.post('/api/image/fast', async (req, res) => {
   try {
     const { prompt } = req.body;
@@ -115,19 +117,16 @@ app.post('/api/image/fast', async (req, res) => {
   }
 });
 
-// Email subscribe — schreibt direkt in Supabase subscribers table
+// Email subscribe — writes to Supabase subscribers table
 app.post('/api/subscribe', async (req, res) => {
   try {
     const { email, source } = req.body;
     if (!email || !email.includes('@')) {
       return res.status(400).json({ error: 'Valid email required' });
     }
-
     if (!SUPABASE_URL || !SUPABASE_KEY) {
-      console.error('Subscribe: SUPABASE_URL or SUPABASE_KEY missing in env');
       return res.status(500).json({ error: 'Supabase not configured' });
     }
-
     const response = await fetch(`${SUPABASE_URL}/rest/v1/subscribers`, {
       method: 'POST',
       headers: {
@@ -141,20 +140,101 @@ app.post('/api/subscribe', async (req, res) => {
         source: source || 'landing'
       })
     });
-
     if (!response.ok) {
       const errText = await response.text();
-      // 23505 = unique_violation (email already exists) — silent success
       if (errText.includes('23505') || errText.includes('duplicate')) {
         return res.json({ ok: true, duplicate: true });
       }
       console.error('Supabase subscribe error:', response.status, errText);
       return res.status(500).json({ error: 'Failed to save subscriber' });
     }
-
     res.json({ ok: true });
   } catch (err) {
     console.error('Subscribe handler error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Save card — writes to Supabase cards table, returns assigned global number + misprint_number
+app.post('/api/save-card', async (req, res) => {
+  try {
+    const { email, card } = req.body;
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ error: 'Valid email required' });
+    }
+    if (!card || typeof card !== 'object') {
+      return res.status(400).json({ error: 'Card data required' });
+    }
+    if (!SUPABASE_URL || !SUPABASE_KEY) {
+      return res.status(500).json({ error: 'Supabase not configured' });
+    }
+
+    // 1) Make sure the email is in subscribers (upsert-style: ignore duplicate)
+    try {
+      await fetch(`${SUPABASE_URL}/rest/v1/subscribers`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Prefer': 'return=minimal'
+        },
+        body: JSON.stringify({
+          email: email.toLowerCase().trim(),
+          source: card.source || 'card'
+        })
+      });
+    } catch (subErr) {
+      console.warn('Subscribe-on-save failed (non-fatal):', subErr.message);
+    }
+
+    // 2) Insert the card — Postgres assigns `number` via BIGSERIAL, trigger sets `misprint_number` if rarity='misprint'
+    const body = {
+      email: email.toLowerCase().trim(),
+      session_title: card.session_title || null,
+      legendary_moment: card.legendary_moment || null,
+      character_name: card.character_name || null,
+      character_class: card.character_class || null,
+      rarity: card.rarity || 'rare',
+      visible_roll: typeof card.visible_roll === 'number' ? card.visible_roll : null,
+      image_url: card.image_url || null,
+      image_url_temp: card.image_url_temp || card.image_url || null,
+      seed_hash: card.seed_hash || null
+    };
+
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/cards`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Save-card error:', response.status, errText);
+      return res.status(500).json({ error: 'Failed to save card', detail: errText.slice(0, 300) });
+    }
+
+    const rows = await response.json();
+    const saved = Array.isArray(rows) ? rows[0] : rows;
+
+    res.json({
+      ok: true,
+      card: {
+        id: saved.id,
+        number: saved.number,                     // global sequential: "the 834th card ever"
+        misprint_number: saved.misprint_number,   // null for non-misprint, sequential for misprints
+        rarity: saved.rarity,
+        email: saved.email,
+        created_at: saved.created_at
+      }
+    });
+  } catch (err) {
+    console.error('Save-card handler error:', err);
     res.status(500).json({ error: err.message });
   }
 });
