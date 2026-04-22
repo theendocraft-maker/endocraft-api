@@ -165,13 +165,13 @@ app.post('/api/subscribe', async (req, res) => {
   }
 });
 
-// Save card — writes to Supabase cards table, returns assigned global number + misprint_number
+// Save card — writes to Supabase cards table, returns assigned global number + misprint_number.
+// Email is OPTIONAL now: if the caller omits email, the card is saved with an anonymous placeholder
+// so the share link works immediately. The user can later PATCH via /api/claim-card to attach their
+// real email (claim = sealing) which moves the card into their collection.
 app.post('/api/save-card', async (req, res) => {
   try {
-    const { email, card } = req.body;
-    if (!email || !email.includes('@')) {
-      return res.status(400).json({ error: 'Valid email required' });
-    }
+    const { email, card, id: updateId } = req.body;
     if (!card || typeof card !== 'object') {
       return res.status(400).json({ error: 'Card data required' });
     }
@@ -179,29 +179,67 @@ app.post('/api/save-card', async (req, res) => {
       return res.status(500).json({ error: 'Supabase not configured' });
     }
 
-    // 1) Make sure the email is in subscribers (upsert-style: ignore duplicate)
-    try {
-      await fetch(`${SUPABASE_URL}/rest/v1/subscribers`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-          'Prefer': 'return=minimal'
-        },
-        body: JSON.stringify({
-          email: email.toLowerCase().trim(),
-          source: card.source || 'card'
-        })
+    const hasRealEmail = !!(email && typeof email === 'string' && email.includes('@'));
+    // If no email: generate an anon placeholder so the NOT NULL constraint on email is satisfied.
+    // Placeholder is randomized so anon cards never collide.
+    const effectiveEmail = hasRealEmail
+      ? email.toLowerCase().trim()
+      : `anon-${crypto.randomBytes(8).toString('hex')}@endocraft.anon`;
+    const ownerSlug = emailToSlug(effectiveEmail);
+
+    // ─── UPDATE path: caller passed an existing id + an email → attach email to anon card
+    if (updateId && hasRealEmail && /^[a-f0-9-]{10,}$/i.test(updateId)) {
+      // Upsert subscribers (best-effort)
+      try {
+        await fetch(`${SUPABASE_URL}/rest/v1/subscribers`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Prefer': 'return=minimal' },
+          body: JSON.stringify({ email: email.toLowerCase().trim(), source: card.source || 'card-claim' })
+        });
+      } catch (e) { console.warn('subscribe-on-claim failed:', e.message); }
+
+      const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/cards?id=eq.${encodeURIComponent(updateId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Prefer': 'return=representation' },
+        body: JSON.stringify({ email: effectiveEmail, owner_slug: ownerSlug })
       });
-    } catch (subErr) {
-      console.warn('Subscribe-on-save failed (non-fatal):', subErr.message);
+      if (!patchRes.ok) {
+        const errText = await patchRes.text();
+        console.error('claim-card PATCH error:', patchRes.status, errText);
+        return res.status(500).json({ error: 'Failed to claim card', detail: errText.slice(0, 300) });
+      }
+      const patched = await patchRes.json();
+      const updated = Array.isArray(patched) ? patched[0] : patched;
+      return res.json({
+        ok: true,
+        claimed: true,
+        card: {
+          id: updated.id,
+          number: updated.number,
+          misprint_number: updated.misprint_number,
+          rarity: updated.rarity,
+          email: updated.email,
+          owner_slug: ownerSlug,
+          created_at: updated.created_at
+        }
+      });
     }
 
-    // 2) Insert the card — Postgres assigns `number` via BIGSERIAL, trigger sets `misprint_number` if rarity='misprint'
-    const ownerSlug = emailToSlug(email);
+    // ─── INSERT path (anonymous or first-time email save)
+    if (hasRealEmail) {
+      try {
+        await fetch(`${SUPABASE_URL}/rest/v1/subscribers`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Prefer': 'return=minimal' },
+          body: JSON.stringify({ email: effectiveEmail, source: card.source || 'card' })
+        });
+      } catch (subErr) {
+        console.warn('Subscribe-on-save failed (non-fatal):', subErr.message);
+      }
+    }
+
     const body = {
-      email: email.toLowerCase().trim(),
+      email: effectiveEmail,
       owner_slug: ownerSlug,
       session_title: card.session_title || null,
       legendary_moment: card.legendary_moment || null,
@@ -216,12 +254,7 @@ app.post('/api/save-card', async (req, res) => {
 
     const response = await fetch(`${SUPABASE_URL}/rest/v1/cards`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Prefer': 'return=representation'
-      },
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Prefer': 'return=representation' },
       body: JSON.stringify(body)
     });
 
@@ -236,13 +269,14 @@ app.post('/api/save-card', async (req, res) => {
 
     res.json({
       ok: true,
+      anon: !hasRealEmail,
       card: {
         id: saved.id,
-        number: saved.number,                     // global sequential: "the 834th card ever"
-        misprint_number: saved.misprint_number,   // null for non-misprint, sequential for misprints
+        number: saved.number,
+        misprint_number: saved.misprint_number,
         rarity: saved.rarity,
-        email: saved.email,
-        owner_slug: ownerSlug,                    // client uses this for /my-cards/[slug] URL
+        email: hasRealEmail ? saved.email : null,
+        owner_slug: hasRealEmail ? ownerSlug : null,
         created_at: saved.created_at
       }
     });
