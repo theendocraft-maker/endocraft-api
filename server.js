@@ -4,6 +4,13 @@ const crypto = require('crypto');
 const app = express();
 const { rollRarity, buildRarityPromptModifier } = require('./rarity');
 
+// Optional sharp dependency — used in /img/:id to transcode WebP → JPEG so WhatsApp / Slack /
+// Messenger can render link previews. If not installed, proxy falls back to passthrough and
+// WebP images will text-only preview on WhatsApp. Graceful degradation either way.
+let sharp;
+try { sharp = require('sharp'); }
+catch (e) { console.warn('[img proxy] sharp not available — WhatsApp previews may fail for WebP images. Installing will fix.'); }
+
 // Deterministic slug from email — 16 hex chars of sha256(lowercase trimmed email)
 // Same algorithm as the SQL backfill, so existing + new cards match
 function emailToSlug(email){
@@ -375,9 +382,28 @@ app.get('/img/:id', async (req, res) => {
       console.warn('img proxy upstream status:', imgRes.status, 'for', src);
       return res.redirect(302, 'https://endocraft.app/IMG_8431.PNG');
     }
-    const contentType = imgRes.headers.get('content-type') || 'image/jpeg';
-    const buf = Buffer.from(await imgRes.arrayBuffer());
-    res.setHeader('Content-Type', contentType);
+    const upstreamType = imgRes.headers.get('content-type') || 'image/jpeg';
+    let buf = Buffer.from(await imgRes.arrayBuffer());
+    let outType = upstreamType;
+
+    // If sharp is available, transcode to JPEG at 1200px max — guarantees WhatsApp/Slack/Messenger
+    // preview compatibility. WebP is the killer here: Seedream / AIML often returns WebP, which
+    // WhatsApp cannot render in link previews. JPEG + resize also keeps OG images well under size
+    // limits (typical 200-400 KB vs multi-MB originals).
+    if (sharp) {
+      try {
+        buf = await sharp(buf)
+          .rotate() // respect EXIF orientation
+          .resize(1200, 1200, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 85, progressive: true, mozjpeg: true })
+          .toBuffer();
+        outType = 'image/jpeg';
+      } catch (sharpErr) {
+        console.warn('[img proxy] sharp transform failed, passing upstream bytes through:', sharpErr.message);
+      }
+    }
+
+    res.setHeader('Content-Type', outType);
     res.setHeader('Cache-Control', 'public, max-age=2592000, immutable'); // 30 days
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(buf);
