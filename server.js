@@ -65,6 +65,77 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DM STUDIO CHAT — AI co-DM for TTRPG tables with full campaign context.
+// Different from /api/chat (Session Scroll Rarity flow) — no rarity roll,
+// and accepts a structured `campaign` block that's serialized into the system
+// prompt so Claude has full awareness of party, locations, sessions.
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/dm-chat', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
+  try {
+    const { campaign, messages, model = 'claude-sonnet-4-6', max_tokens = 1500 } = req.body;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages array required' });
+    }
+
+    // Build a rich system prompt from the campaign structure. Claude needs:
+    // campaign name + session metadata + party + serialized locations + current-location focus.
+    const loc = campaign?.locations?.[campaign?.currentLocationId] || null;
+    const locationsDump = Object.entries(campaign?.locations || {})
+      .map(([id, l]) => {
+        const parts = [];
+        parts.push(`[${id}] ${l.name}${l.meta ? ' · ' + l.meta : ''}`);
+        if (l.readAloud) parts.push(`  READ-ALOUD: ${l.readAloud.replace(/\n/g, ' ')}`);
+        if (l.dmNote) parts.push(`  DM-NOTE: ${l.dmNote}`);
+        if (l.scenarios?.length) parts.push('  SZENARIEN: ' + l.scenarios.map(s => `"${s.title}" (${s.probability}): ${s.body}`).join(' | '));
+        if (l.dialogs?.length) parts.push('  DIALOGE: ' + l.dialogs.map(d => `${d.speaker}: ${d.text}`).join(' | '));
+        if (l.statblocks?.length) parts.push('  STATS: ' + l.statblocks.map(s => `${s.name} [${s.rows.map(r => r.join(': ')).join(', ')}]`).join(' | '));
+        if (l.history) parts.push(`  HISTORIE: ${l.history}`);
+        return parts.join('\n');
+      }).join('\n\n');
+
+    const systemPrompt = `Du bist der KI-Co-DM für einen D&D-5e-Tisch. Du hast vollständigen Zugriff auf die Kampagne, Party und Session-Historie. Antworte immer auf Deutsch, im Ton eines erfahrenen Storytellers.
+
+DEINE AUFGABEN:
+• Improvisiere NPC-Dialoge und Reaktionen im Stil der Welt
+• Schlage plausible Konsequenzen von Party-Aktionen vor
+• Generiere Vorlese-Texte (atmosphärisch, 2-4 Sätze)
+• Bewahre Welt-Konsistenz mit bisherigen Sessions
+• Gib Statblock- und Regelauskünfte präzise
+• Hilf bei Session-Vorbereitung
+
+ANTWORT-FORMAT:
+• Knapp und DM-orientiert — keine Meta-Kommentare, keine Floskeln
+• Wenn ein Bild helfen würde, füge in eigener Zeile ein: [GENERATE_IMAGE: photorealistic fantasy prompt in englisch, ca. 60-100 Worte]
+• Nutze **fette** Wörter für Namen und Regel-Begriffe
+• Markdown für Listen erlaubt, sparsam einsetzen
+• Niemals die Unterhaltung des Spielers erfinden — du bist der DM-Helfer, nicht der Spieler
+
+KAMPAGNE: ${campaign?.name || 'Unbekannt'}
+${campaign?.session ? `SESSION ${campaign.session.number} · ${campaign.session.title} · Level ${campaign.session.level}` : ''}
+PARTY: ${(campaign?.party || []).join(' · ')}
+
+AKTUELLER STANDORT: ${loc ? `${loc.name}${loc.meta ? ' · ' + loc.meta : ''}` : 'Kein Standort ausgewählt'}
+${loc?.dmNote ? `DM-NOTIZ ZUM AKTUELLEN STANDORT: ${loc.dmNote}` : ''}
+
+VOLLSTÄNDIGE KAMPAGNEN-DATENBANK:
+${locationsDump || '(keine Locations dokumentiert)'}
+`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model, max_tokens, system: systemPrompt, messages })
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    console.error('[dm-chat]', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/image', async (req, res) => {
   try {
     const { prompt, model = 'flux-pro', width, height, aspect_ratio } = req.body;
@@ -491,6 +562,13 @@ function renderCardSharePage(card) {
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Cinzel+Decorative:wght@700;900&family=EB+Garamond:ital@0;1&family=Syne:wght@700;800&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- Privacy-friendly analytics by Plausible — tracks viral share-click traffic -->
+<script async src="https://plausible.io/js/pa-XyfUV-SPa2VMk20wnbpyy.js"></script>
+<script>
+  window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
+  plausible.init()
+</script>
 
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
