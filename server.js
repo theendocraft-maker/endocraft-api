@@ -394,14 +394,18 @@ function escapeHtml(s) {
 }
 
 function renderCardSharePage(card) {
-  const title = card.session_title || 'A legendary moment';
+  // Data-model note: in our schema `session_title` actually holds the character name (what's
+  // displayed as the big card name, e.g. "Lyra", "Caspian"). `legendary_moment` holds the moment
+  // title (e.g. "The Dragon's Eye"). `character_name` is an optional extracted field that may be
+  // null. We prefer session_title for display because it's always populated from #tcName.
+  const charName = card.session_title || card.character_name || 'Hero';
   const moment = card.legendary_moment || '';
-  const charName = card.character_name || 'Hero';
   const charClass = card.character_class || '';
   const rarity = (card.rarity || 'rare').toLowerCase();
   const rarityUpper = rarity.charAt(0).toUpperCase() + rarity.slice(1);
   const num = card.number ? String(card.number).padStart(4, '0') : '0000';
   const serial = `${charName} #${num} / 9999`;
+  const title = moment || 'A legendary moment';
   // Display image — direct from AIML (what the user sees when viewing the page)
   const imgUrl = card.image_url || 'https://endocraft.app/IMG_8431.PNG';
   // OG image — routed through our proxy so link previews have a stable, cacheable, correctly-typed URL
@@ -409,11 +413,13 @@ function renderCardSharePage(card) {
   const ogImgUrl = `https://endocraft-production.up.railway.app/img/${card.id}`;
   const dateStr = card.created_at ? new Date(card.created_at).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
 
-  // OG description — short, punchy, works in Twitter/Discord/WhatsApp previews
+  // OG description — short, punchy, works in Twitter/Discord/WhatsApp previews.
+  // Title = "Character · Moment" (e.g. "Lyra · The Dragon's Eye"). Description adds metadata
+  // (class, rarity, serial) without repeating the moment — keeps preview info-dense.
   const ogTitle = `${charName} · ${title}`;
-  const ogDesc = moment
-    ? `"${moment.slice(0, 155)}${moment.length > 155 ? '…' : ''}" — ${rarityUpper} · Sealed on EndoCraft`
-    : `${rarityUpper} · Sealed moment · ${dateStr}`;
+  const ogDesc = charClass
+    ? `${charClass} · ${rarityUpper} moment · Sealed on EndoCraft`
+    : `${rarityUpper} moment · Nº ${num} · Sealed on EndoCraft`;
 
   const shareUrl = `https://endocraft-production.up.railway.app/c/${card.id}`;
 
