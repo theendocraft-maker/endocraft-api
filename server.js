@@ -95,31 +95,46 @@ app.post('/api/dm-chat', async (req, res) => {
         return parts.join('\n');
       }).join('\n\n');
 
+    // Serialize characters (PCs + NPCs) so Claude knows the party + relevant NPCs with stats/personality
+    const charsDump = (campaign?.characters || []).map(c => {
+      const tag = c.type === 'pc' ? 'SPIELER' : 'NPC';
+      const parts = [`[${tag}] ${c.name} — ${c.race || '?'} ${c.class || '?'} · Lv/CR ${c.level || '?'} · HP ${c.hp}/${c.maxHp} · AC ${c.ac}`];
+      if (c.stats) parts.push(`  STR ${c.stats.str} DEX ${c.stats.dex} CON ${c.stats.con} INT ${c.stats.int} WIS ${c.stats.wis} CHA ${c.stats.cha}`);
+      if (c.backstory) parts.push(`  BACKSTORY: ${c.backstory}`);
+      if (c.personality) parts.push(`  PERSÖNLICHKEIT: ${c.personality}`);
+      if (c.notes) parts.push(`  DM-NOTES: ${c.notes}`);
+      return parts.join('\n');
+    }).join('\n\n');
+
     const systemPrompt = `Du bist der KI-Co-DM für einen D&D-5e-Tisch. Du hast vollständigen Zugriff auf die Kampagne, Party und Session-Historie. Antworte immer auf Deutsch, im Ton eines erfahrenen Storytellers.
 
 DEINE AUFGABEN:
 • Improvisiere NPC-Dialoge und Reaktionen im Stil der Welt
 • Schlage plausible Konsequenzen von Party-Aktionen vor
-• Generiere Vorlese-Texte (atmosphärisch, 2-4 Sätze)
+• Generiere Vorlese-Texte (atmosphärisch, 2-4 Sätze) — umschließe sie mit [READ_ALOUD: ...]
 • Bewahre Welt-Konsistenz mit bisherigen Sessions
 • Gib Statblock- und Regelauskünfte präzise
 • Hilf bei Session-Vorbereitung
 
 ANTWORT-FORMAT:
 • Knapp und DM-orientiert — keine Meta-Kommentare, keine Floskeln
-• Wenn ein Bild helfen würde, füge in eigener Zeile ein: [GENERATE_IMAGE: photorealistic fantasy prompt in englisch, ca. 60-100 Worte]
+• Vorlese-Text immer im Format: [READ_ALOUD: Der atmosphärische Text hier.] — wird als eigener Block gerendert
+• Wenn ein Bild helfen würde: [GENERATE_IMAGE: photorealistic fantasy prompt in English, 60-100 words]
 • Nutze **fette** Wörter für Namen und Regel-Begriffe
-• Markdown für Listen erlaubt, sparsam einsetzen
-• Niemals die Unterhaltung des Spielers erfinden — du bist der DM-Helfer, nicht der Spieler
+• Referenziere Party-Mitglieder beim Namen (mit ihren Klassen-Schwächen) und NPCs mit ihrer Persönlichkeit
+• Niemals Spieler-Entscheidungen erfinden — du bist der DM-Helfer, nicht der Spieler
 
 KAMPAGNE: ${campaign?.name || 'Unbekannt'}
 ${campaign?.session ? `SESSION ${campaign.session.number} · ${campaign.session.title} · Level ${campaign.session.level}` : ''}
-PARTY: ${(campaign?.party || []).join(' · ')}
+
+CHARAKTERE (Party + NPCs):
+${charsDump || '(keine Charaktere angelegt)'}
 
 AKTUELLER STANDORT: ${loc ? `${loc.name}${loc.meta ? ' · ' + loc.meta : ''}` : 'Kein Standort ausgewählt'}
+${loc?.readAloud ? `AKTUELLER VORLESE-TEXT: ${loc.readAloud}` : ''}
 ${loc?.dmNote ? `DM-NOTIZ ZUM AKTUELLEN STANDORT: ${loc.dmNote}` : ''}
 
-VOLLSTÄNDIGE KAMPAGNEN-DATENBANK:
+VOLLSTÄNDIGE KAMPAGNEN-DATENBANK (alle Locations):
 ${locationsDump || '(keine Locations dokumentiert)'}
 `;
 
