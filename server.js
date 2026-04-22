@@ -354,6 +354,39 @@ app.get('/api/card/:id', async (req, res) => {
   res.json({ ok: true, card });
 });
 
+// ─── IMAGE PROXY ────────────────────────────────────────────────────────────
+// Serves the card's image through our own URL — critical for:
+//  1) Stable OG/Twitter preview URLs (AIML CDN links expire)
+//  2) Consistent Cache-Control so WhatsApp/Twitter/Discord don't re-fetch
+//  3) Correct Content-Type (some generators return WebP; here we keep upstream type but fall back to image/jpeg)
+// Used as og:image on /c/:id so socials always hit an EndoCraft URL.
+app.get('/img/:id', async (req, res) => {
+  const id = req.params.id;
+  if (!/^[a-f0-9-]{10,}$/i.test(id)) return res.status(400).send('Invalid id');
+  const card = await fetchCardById(id);
+  const src = card && (card.image_url || card.image_url_temp);
+  if (!src) {
+    // Fallback: redirect to the static EndoCraft logo so previews never 404
+    return res.redirect(302, 'https://endocraft.app/IMG_8431.PNG');
+  }
+  try {
+    const imgRes = await fetch(src);
+    if (!imgRes.ok) {
+      console.warn('img proxy upstream status:', imgRes.status, 'for', src);
+      return res.redirect(302, 'https://endocraft.app/IMG_8431.PNG');
+    }
+    const contentType = imgRes.headers.get('content-type') || 'image/jpeg';
+    const buf = Buffer.from(await imgRes.arrayBuffer());
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=2592000, immutable'); // 30 days
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.send(buf);
+  } catch (err) {
+    console.error('img proxy exception:', err);
+    return res.redirect(302, 'https://endocraft.app/IMG_8431.PNG');
+  }
+});
+
 // Escape helper for safe insertion into HTML
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -369,10 +402,14 @@ function renderCardSharePage(card) {
   const rarityUpper = rarity.charAt(0).toUpperCase() + rarity.slice(1);
   const num = card.number ? String(card.number).padStart(4, '0') : '0000';
   const serial = `${charName} #${num} / 9999`;
+  // Display image — direct from AIML (what the user sees when viewing the page)
   const imgUrl = card.image_url || 'https://endocraft.app/IMG_8431.PNG';
+  // OG image — routed through our proxy so link previews have a stable, cacheable, correctly-typed URL
+  // (AIML CDN links expire; WhatsApp caches the preview for days — we need a URL we control.)
+  const ogImgUrl = `https://endocraft-production.up.railway.app/img/${card.id}`;
   const dateStr = card.created_at ? new Date(card.created_at).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
 
-  // OG description — short, punchy, works in Twitter/Discord previews
+  // OG description — short, punchy, works in Twitter/Discord/WhatsApp previews
   const ogTitle = `${charName} · ${title}`;
   const ogDesc = moment
     ? `"${moment.slice(0, 155)}${moment.length > 155 ? '…' : ''}" — ${rarityUpper} · Sealed on EndoCraft`
@@ -402,16 +439,19 @@ function renderCardSharePage(card) {
 <meta property="og:site_name" content="EndoCraft">
 <meta property="og:title" content="${escapeHtml(ogTitle)}">
 <meta property="og:description" content="${escapeHtml(ogDesc)}">
-<meta property="og:image" content="${escapeHtml(imgUrl)}">
+<meta property="og:image" content="${escapeHtml(ogImgUrl)}">
+<meta property="og:image:secure_url" content="${escapeHtml(ogImgUrl)}">
 <meta property="og:image:alt" content="${escapeHtml(title)} — sealed EndoCraft trading card">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="1600">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1440">
+<meta property="og:image:height" content="2560">
 <meta property="og:url" content="${escapeHtml(shareUrl)}">
 
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${escapeHtml(ogTitle)}">
 <meta name="twitter:description" content="${escapeHtml(ogDesc)}">
-<meta name="twitter:image" content="${escapeHtml(imgUrl)}">
+<meta name="twitter:image" content="${escapeHtml(ogImgUrl)}">
+<meta name="twitter:image:alt" content="${escapeHtml(title)} — sealed EndoCraft trading card">
 
 <meta name="description" content="${escapeHtml(ogDesc)}">
 <meta name="theme-color" content="${accentColor}">
