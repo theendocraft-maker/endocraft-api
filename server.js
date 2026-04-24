@@ -4,12 +4,11 @@ const crypto = require('crypto');
 const app = express();
 const { rollRarity, buildRarityPromptModifier } = require('./rarity');
 
-// Optional sharp dependency — used in /img/:id to transcode WebP → JPEG so WhatsApp / Slack /
-// Messenger can render link previews. If not installed, proxy falls back to passthrough and
-// WebP images will text-only preview on WhatsApp. Graceful degradation either way.
+// Optional: sharp for image transcoding (WebP → JPEG so WhatsApp / Slack / Messenger render previews).
+// If not installed, /img/:id falls back to passthrough and large/WebP images may not preview on WhatsApp.
 let sharp;
 try { sharp = require('sharp'); }
-catch (e) { console.warn('[img proxy] sharp not available — WhatsApp previews may fail for WebP images. Installing will fix.'); }
+catch (e) { console.warn('[img proxy] sharp not installed — WhatsApp link previews may fail for WebP images. Run: npm install sharp'); }
 
 // Deterministic slug from email — 16 hex chars of sha256(lowercase trimmed email)
 // Same algorithm as the SQL backfill, so existing + new cards match
@@ -61,92 +60,6 @@ app.post('/api/chat', async (req, res) => {
       visible_roll: visibleRoll
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// DM STUDIO CHAT — AI co-DM for TTRPG tables with full campaign context.
-// Different from /api/chat (Session Scroll Rarity flow) — no rarity roll,
-// and accepts a structured `campaign` block that's serialized into the system
-// prompt so Claude has full awareness of party, locations, sessions.
-// ═══════════════════════════════════════════════════════════════════════════
-app.post('/api/dm-chat', async (req, res) => {
-  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
-  try {
-    const { campaign, messages, model = 'claude-sonnet-4-6', max_tokens = 1500 } = req.body;
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: 'messages array required' });
-    }
-
-    // Build a rich system prompt from the campaign structure. Claude needs:
-    // campaign name + session metadata + party + serialized locations + current-location focus.
-    const loc = campaign?.locations?.[campaign?.currentLocationId] || null;
-    const locationsDump = Object.entries(campaign?.locations || {})
-      .map(([id, l]) => {
-        const parts = [];
-        parts.push(`[${id}] ${l.name}${l.meta ? ' · ' + l.meta : ''}`);
-        if (l.readAloud) parts.push(`  READ-ALOUD: ${l.readAloud.replace(/\n/g, ' ')}`);
-        if (l.dmNote) parts.push(`  DM-NOTE: ${l.dmNote}`);
-        if (l.scenarios?.length) parts.push('  SZENARIEN: ' + l.scenarios.map(s => `"${s.title}" (${s.probability}): ${s.body}`).join(' | '));
-        if (l.dialogs?.length) parts.push('  DIALOGE: ' + l.dialogs.map(d => `${d.speaker}: ${d.text}`).join(' | '));
-        if (l.statblocks?.length) parts.push('  STATS: ' + l.statblocks.map(s => `${s.name} [${s.rows.map(r => r.join(': ')).join(', ')}]`).join(' | '));
-        if (l.history) parts.push(`  HISTORIE: ${l.history}`);
-        return parts.join('\n');
-      }).join('\n\n');
-
-    // Serialize characters (PCs + NPCs) so Claude knows the party + relevant NPCs with stats/personality
-    const charsDump = (campaign?.characters || []).map(c => {
-      const tag = c.type === 'pc' ? 'SPIELER' : 'NPC';
-      const parts = [`[${tag}] ${c.name} — ${c.race || '?'} ${c.class || '?'} · Lv/CR ${c.level || '?'} · HP ${c.hp}/${c.maxHp} · AC ${c.ac}`];
-      if (c.stats) parts.push(`  STR ${c.stats.str} DEX ${c.stats.dex} CON ${c.stats.con} INT ${c.stats.int} WIS ${c.stats.wis} CHA ${c.stats.cha}`);
-      if (c.backstory) parts.push(`  BACKSTORY: ${c.backstory}`);
-      if (c.personality) parts.push(`  PERSÖNLICHKEIT: ${c.personality}`);
-      if (c.notes) parts.push(`  DM-NOTES: ${c.notes}`);
-      return parts.join('\n');
-    }).join('\n\n');
-
-    const systemPrompt = `Du bist der KI-Co-DM für einen D&D-5e-Tisch. Du hast vollständigen Zugriff auf die Kampagne, Party und Session-Historie. Antworte immer auf Deutsch, im Ton eines erfahrenen Storytellers.
-
-DEINE AUFGABEN:
-• Improvisiere NPC-Dialoge und Reaktionen im Stil der Welt
-• Schlage plausible Konsequenzen von Party-Aktionen vor
-• Generiere Vorlese-Texte (atmosphärisch, 2-4 Sätze) — umschließe sie mit [READ_ALOUD: ...]
-• Bewahre Welt-Konsistenz mit bisherigen Sessions
-• Gib Statblock- und Regelauskünfte präzise
-• Hilf bei Session-Vorbereitung
-
-ANTWORT-FORMAT:
-• Knapp und DM-orientiert — keine Meta-Kommentare, keine Floskeln
-• Vorlese-Text immer im Format: [READ_ALOUD: Der atmosphärische Text hier.] — wird als eigener Block gerendert
-• Wenn ein Bild helfen würde: [GENERATE_IMAGE: photorealistic fantasy prompt in English, 60-100 words]
-• Nutze **fette** Wörter für Namen und Regel-Begriffe
-• Referenziere Party-Mitglieder beim Namen (mit ihren Klassen-Schwächen) und NPCs mit ihrer Persönlichkeit
-• Niemals Spieler-Entscheidungen erfinden — du bist der DM-Helfer, nicht der Spieler
-
-KAMPAGNE: ${campaign?.name || 'Unbekannt'}
-${campaign?.session ? `SESSION ${campaign.session.number} · ${campaign.session.title} · Level ${campaign.session.level}` : ''}
-
-CHARAKTERE (Party + NPCs):
-${charsDump || '(keine Charaktere angelegt)'}
-
-AKTUELLER STANDORT: ${loc ? `${loc.name}${loc.meta ? ' · ' + loc.meta : ''}` : 'Kein Standort ausgewählt'}
-${loc?.readAloud ? `AKTUELLER VORLESE-TEXT: ${loc.readAloud}` : ''}
-${loc?.dmNote ? `DM-NOTIZ ZUM AKTUELLEN STANDORT: ${loc.dmNote}` : ''}
-
-VOLLSTÄNDIGE KAMPAGNEN-DATENBANK (alle Locations):
-${locationsDump || '(keine Locations dokumentiert)'}
-`;
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model, max_tokens, system: systemPrompt, messages })
-    });
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    console.error('[dm-chat]', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -459,7 +372,6 @@ app.get('/img/:id', async (req, res) => {
   const card = await fetchCardById(id);
   const src = card && (card.image_url || card.image_url_temp);
   if (!src) {
-    // Fallback: redirect to the static EndoCraft logo so previews never 404
     return res.redirect(302, 'https://endocraft.app/IMG_8431.PNG');
   }
   try {
@@ -472,10 +384,8 @@ app.get('/img/:id', async (req, res) => {
     let buf = Buffer.from(await imgRes.arrayBuffer());
     let outType = upstreamType;
 
-    // If sharp is available, transcode to JPEG at 1200px max — guarantees WhatsApp/Slack/Messenger
-    // preview compatibility. WebP is the killer here: Seedream / AIML often returns WebP, which
-    // WhatsApp cannot render in link previews. JPEG + resize also keeps OG images well under size
-    // limits (typical 200-400 KB vs multi-MB originals).
+    // If sharp is available, transcode to JPEG at 1200px max — guarantees WhatsApp/Slack/Messenger compat.
+    // WebP is the killer here: AIML/Seedream often returns WebP, which WhatsApp cannot render in previews.
     if (sharp) {
       try {
         buf = await sharp(buf)
@@ -577,13 +487,6 @@ function renderCardSharePage(card) {
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Cinzel+Decorative:wght@700;900&family=EB+Garamond:ital@0;1&family=Syne:wght@700;800&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-
-<!-- Privacy-friendly analytics by Plausible — tracks viral share-click traffic -->
-<script async src="https://plausible.io/js/pa-XyfUV-SPa2VMk20wnbpyy.js"></script>
-<script>
-  window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
-  plausible.init()
-</script>
 
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
