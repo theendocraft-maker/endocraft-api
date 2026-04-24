@@ -4,11 +4,12 @@ const crypto = require('crypto');
 const app = express();
 const { rollRarity, buildRarityPromptModifier } = require('./rarity');
 
-// Optional: sharp for image transcoding (WebP → JPEG so WhatsApp / Slack / Messenger render previews).
-// If not installed, /img/:id falls back to passthrough and large/WebP images may not preview on WhatsApp.
+// Optional sharp dependency — used in /img/:id to transcode WebP → JPEG so WhatsApp / Slack /
+// Messenger can render link previews. If not installed, proxy falls back to passthrough and
+// WebP images will text-only preview on WhatsApp. Graceful degradation either way.
 let sharp;
 try { sharp = require('sharp'); }
-catch (e) { console.warn('[img proxy] sharp not installed — WhatsApp link previews may fail for WebP images. Run: npm install sharp'); }
+catch (e) { console.warn('[img proxy] sharp not available — WhatsApp previews may fail for WebP images. Installing will fix.'); }
 
 // Deterministic slug from email — 16 hex chars of sha256(lowercase trimmed email)
 // Same algorithm as the SQL backfill, so existing + new cards match
@@ -64,15 +65,215 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DM STUDIO CHAT — AI co-DM for TTRPG tables with full campaign context.
+// Different from /api/chat (Session Scroll Rarity flow) — no rarity roll,
+// and accepts a structured `campaign` block that's serialized into the system
+// prompt so Claude has full awareness of party, locations, sessions.
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/dm-chat', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
+  try {
+    const { campaign, messages, model = 'claude-sonnet-4-6', max_tokens = 1500 } = req.body;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages array required' });
+    }
+
+    // Build a rich system prompt from the campaign structure. Claude needs:
+    // campaign name + session metadata + party + serialized locations + current-location focus.
+    const loc = campaign?.locations?.[campaign?.currentLocationId] || null;
+    const locationsDump = Object.entries(campaign?.locations || {})
+      .map(([id, l]) => {
+        const parts = [];
+        parts.push(`[${id}] ${l.name}${l.meta ? ' · ' + l.meta : ''}`);
+        if (l.readAloud) parts.push(`  READ-ALOUD: ${l.readAloud.replace(/\n/g, ' ')}`);
+        if (l.dmNote) parts.push(`  DM-NOTE: ${l.dmNote}`);
+        if (l.scenarios?.length) parts.push('  SZENARIEN: ' + l.scenarios.map(s => `"${s.title}" (${s.probability}): ${s.body}`).join(' | '));
+        if (l.dialogs?.length) parts.push('  DIALOGE: ' + l.dialogs.map(d => `${d.speaker}: ${d.text}`).join(' | '));
+        if (l.statblocks?.length) parts.push('  STATS: ' + l.statblocks.map(s => `${s.name} [${s.rows.map(r => r.join(': ')).join(', ')}]`).join(' | '));
+        if (l.history) parts.push(`  HISTORIE: ${l.history}`);
+        return parts.join('\n');
+      }).join('\n\n');
+
+    // Serialize characters in classic D&D 5e statblock format so Claude can reference exact
+    // stats, saves, attacks, resistances — same shape as SRD/Monster Manual entries.
+    const mod = s => Math.floor((s - 10) / 2);
+    const fmt = n => (n >= 0 ? '+' : '') + n;
+    const charsDump = (campaign?.characters || []).map(c => {
+      const tag = c.type === 'pc' ? 'PC' : 'NPC';
+      const lines = [];
+      lines.push(`═══ [${tag}] ${c.name} ═══`);
+      lines.push(`${c.size || 'Medium'} ${c.creatureType || c.race || ''}, ${c.alignment || 'unaligned'}`);
+      if (c.type === 'pc') lines.push(`${c.race || ''} ${c.class || ''} · Level ${c.level}`);
+      lines.push(`AC ${c.ac}${c.acType ? ` (${c.acType})` : ''} · HP ${c.hp}/${c.maxHp}${c.hitDice ? ` (${c.hitDice})` : ''} · Speed ${c.speed || '30 ft.'}`);
+      if (c.stats) {
+        const s = c.stats;
+        lines.push(`STR ${s.str}(${fmt(mod(s.str))}) DEX ${s.dex}(${fmt(mod(s.dex))}) CON ${s.con}(${fmt(mod(s.con))}) INT ${s.int}(${fmt(mod(s.int))}) WIS ${s.wis}(${fmt(mod(s.wis))}) CHA ${s.cha}(${fmt(mod(s.cha))})`);
+      }
+      if (c.savingThrows) lines.push(`Saving Throws: ${c.savingThrows}`);
+      if (c.skills) lines.push(`Skills: ${c.skills}`);
+      if (c.damageResistances) lines.push(`Damage Resistances: ${c.damageResistances}`);
+      if (c.damageImmunities) lines.push(`Damage Immunities: ${c.damageImmunities}`);
+      if (c.conditionImmunities) lines.push(`Condition Immunities: ${c.conditionImmunities}`);
+      if (c.senses) lines.push(`Senses: ${c.senses}`);
+      if (c.languages) lines.push(`Languages: ${c.languages}`);
+      if (c.type === 'npc' && c.cr) lines.push(`Challenge: ${c.cr}${c.xp ? ` (${c.xp} XP)` : ''}`);
+      const sec = (title, items) => {
+        if (!items?.length) return '';
+        return `\n${title}:\n` + items.map(it => `• ${it.name}: ${it.text}`).join('\n');
+      };
+      lines.push(sec('Traits', c.traits));
+      lines.push(sec('Actions', c.actions));
+      lines.push(sec('Bonus Actions', c.bonusActions));
+      lines.push(sec('Reactions', c.reactions));
+      lines.push(sec('Legendary Actions', c.legendaryActions));
+      if (c.backstory) lines.push(`\nBACKSTORY: ${c.backstory}`);
+      if (c.personality) lines.push(`PERSONALITY: ${c.personality}`);
+      if (c.notes) lines.push(`DM-NOTES: ${c.notes}`);
+      return lines.filter(l => l).join('\n');
+    }).join('\n\n\n');
+
+    // Serialize active combat state (HP + conditions per combatant)
+    const combatDump = (campaign?.combatState || []).map(e => {
+      const c = (campaign.characters || []).find(x => x.id === e.id); if (!c) return '';
+      const conds = e.conditions?.length ? ` · CONDITIONS: ${e.conditions.join(', ')}` : '';
+      return `  ${c.name}: HP ${e.hp}/${c.maxHp}${e.down ? ' (DOWN)' : ''}${conds}${e.turn ? ' [AKTIV AM ZUG]' : ''}`;
+    }).filter(l => l).join('\n');
+
+    const systemPrompt = `Du bist der KI-Co-DM für einen D&D-5e-Tisch. Du hast vollständigen Zugriff auf die Kampagne, Party und Session-Historie. Antworte immer auf Deutsch, im Ton eines erfahrenen Storytellers.
+
+REGELWERK: D&D 5e. Nutze die offiziellen SRD-5.1-Regeln (CC BY 4.0 Wizards of the Coast) für Conditions, Ability Checks, Saves, Action Economy, Combat, Spells. Wenn ein Spieler etwas versucht, referenziere die relevante Regel (DC, Save Type, Action Type).
+
+DEINE AUFGABEN:
+• Improvisiere NPC-Dialoge und Reaktionen im Stil der Welt
+• Schlage plausible Konsequenzen von Party-Aktionen vor
+• Generiere Vorlese-Texte (atmosphärisch, 2-4 Sätze) — umschließe sie mit [READ_ALOUD: ...]
+• Bewahre Welt-Konsistenz mit bisherigen Sessions
+• Gib Statblock- und Regelauskünfte präzise
+• Hilf bei Session-Vorbereitung
+
+ANTWORT-FORMAT:
+• Knapp und DM-orientiert — keine Meta-Kommentare, keine Floskeln
+• Vorlese-Text immer im Format: [READ_ALOUD: Der atmosphärische Text hier.] — wird als eigener Block gerendert
+• Wenn ein Bild helfen würde: [GENERATE_IMAGE: photorealistic fantasy prompt in English, 60-100 words]
+• Nutze **fette** Wörter für Namen und Regel-Begriffe
+• Referenziere Party-Mitglieder beim Namen (mit ihren Klassen-Schwächen) und NPCs mit ihrer Persönlichkeit
+• Niemals Spieler-Entscheidungen erfinden — du bist der DM-Helfer, nicht der Spieler
+
+KAMPAGNE: ${campaign?.name || 'Unbekannt'}
+${campaign?.session ? `SESSION ${campaign.session.number} · ${campaign.session.title} · Level ${campaign.session.level}` : ''}
+
+${campaign?.lastSessionRecap ? `RECAP DER LETZTEN SESSION:
+${campaign.lastSessionRecap}
+` : ''}
+
+CHARAKTERE (Party + NPCs):
+${charsDump || '(keine Charaktere angelegt)'}
+
+AKTUELLER STANDORT: ${loc ? `${loc.name}${loc.meta ? ' · ' + loc.meta : ''}` : 'Kein Standort ausgewählt'}
+${loc?.readAloud ? `AKTUELLER VORLESE-TEXT: ${loc.readAloud}` : ''}
+${loc?.dmNote ? `DM-NOTIZ ZUM AKTUELLEN STANDORT: ${loc.dmNote}` : ''}
+
+${combatDump ? `AKTIVER KAMPF — LIVE STATUS:
+${combatDump}
+` : ''}
+
+VOLLSTÄNDIGE KAMPAGNEN-DATENBANK (alle Locations):
+${locationsDump || '(keine Locations dokumentiert)'}
+`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model, max_tokens, system: systemPrompt, messages })
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    console.error('[dm-chat]', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DM STUDIO CLOUD SYNC — Supabase-backed state persistence for campaigns.
+// Email-based identity (Phase 1). Upsert on user_email + campaign_id unique pair.
+// Required table:
+//   CREATE TABLE dm_studio_state (
+//     id bigserial PRIMARY KEY,
+//     user_email text NOT NULL,
+//     campaign_id text NOT NULL,
+//     state_json jsonb NOT NULL,
+//     updated_at timestamptz DEFAULT now(),
+//     created_at timestamptz DEFAULT now(),
+//     UNIQUE(user_email, campaign_id)
+//   );
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/dm-studio/save', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { email, campaignId, state } = req.body;
+  if (!email || !campaignId) return res.status(400).json({ error: 'email + campaignId required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/dm_studio_state?on_conflict=user_email,campaign_id`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=representation'
+      },
+      body: JSON.stringify({ user_email: normalized, campaign_id: String(campaignId), state_json: state, updated_at: new Date().toISOString() })
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json({ error: data?.message || 'Supabase error', data });
+    res.json({ ok: true, updated_at: data?.[0]?.updated_at || new Date().toISOString() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/dm-studio/load', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { email, campaignId } = req.query;
+  if (!email || !campaignId) return res.status(400).json({ error: 'email + campaignId required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    const url = `${SUPABASE_URL}/rest/v1/dm_studio_state?user_email=eq.${encodeURIComponent(normalized)}&campaign_id=eq.${encodeURIComponent(campaignId)}&select=*&limit=1`;
+    const resp = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json({ error: data?.message || 'Supabase error' });
+    if (!Array.isArray(data) || !data.length) return res.json({ found: false });
+    res.json({ found: true, state: data[0].state_json, updated_at: data[0].updated_at });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/dm-studio/campaigns', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    const url = `${SUPABASE_URL}/rest/v1/dm_studio_state?user_email=eq.${encodeURIComponent(normalized)}&select=campaign_id,updated_at`;
+    const resp = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const data = await resp.json();
+    res.status(resp.status).json({ campaigns: Array.isArray(data) ? data : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/image', async (req, res) => {
   try {
-    const { prompt, model = 'flux-pro', width, height, aspect_ratio } = req.body;
+    const { prompt, model = 'flux-pro', width, height, aspect_ratio, image_url } = req.body;
     if (!prompt) return res.status(400).json({ error: 'Prompt required' });
     const body = { model, prompt };
     if (model.includes('grok')) {
       body.aspect_ratio = aspect_ratio || '2:3';
     } else if (model.includes('seedream')) {
       body.image_size = { width: Math.max(width || 2048, 1440), height: Math.max(height || 2048, 1440) };
+      // Image-to-Image / Character Reference: wenn image_url mitgegeben, als Seedream-Reference durchreichen.
+      // Seedream 4.5 unterstützt image input via AIML API — base64-Data-URLs oder https-URLs.
+      if (image_url) {
+        body.image_url = image_url;
+        console.log('[/api/image] Seedream mit Reference-Image (' + (image_url.startsWith('data:') ? 'base64' : 'url') + ', length ' + image_url.length + ')');
+      }
     } else if (model.includes('imagen')) {
       body.aspect_ratio = aspect_ratio || '3:4';
     } else {
@@ -372,6 +573,7 @@ app.get('/img/:id', async (req, res) => {
   const card = await fetchCardById(id);
   const src = card && (card.image_url || card.image_url_temp);
   if (!src) {
+    // Fallback: redirect to the static EndoCraft logo so previews never 404
     return res.redirect(302, 'https://endocraft.app/IMG_8431.PNG');
   }
   try {
@@ -384,8 +586,10 @@ app.get('/img/:id', async (req, res) => {
     let buf = Buffer.from(await imgRes.arrayBuffer());
     let outType = upstreamType;
 
-    // If sharp is available, transcode to JPEG at 1200px max — guarantees WhatsApp/Slack/Messenger compat.
-    // WebP is the killer here: AIML/Seedream often returns WebP, which WhatsApp cannot render in previews.
+    // If sharp is available, transcode to JPEG at 1200px max — guarantees WhatsApp/Slack/Messenger
+    // preview compatibility. WebP is the killer here: Seedream / AIML often returns WebP, which
+    // WhatsApp cannot render in link previews. JPEG + resize also keeps OG images well under size
+    // limits (typical 200-400 KB vs multi-MB originals).
     if (sharp) {
       try {
         buf = await sharp(buf)
@@ -487,6 +691,13 @@ function renderCardSharePage(card) {
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Cinzel+Decorative:wght@700;900&family=EB+Garamond:ital@0;1&family=Syne:wght@700;800&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- Privacy-friendly analytics by Plausible — tracks viral share-click traffic -->
+<script async src="https://plausible.io/js/pa-XyfUV-SPa2VMk20wnbpyy.js"></script>
+<script>
+  window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
+  plausible.init()
+</script>
 
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
