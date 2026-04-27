@@ -64,6 +64,560 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DM STUDIO CHAT — AI co-DM for TTRPG tables with full campaign context.
+// Different from /api/chat (Session Scroll Rarity flow) — no rarity roll,
+// and accepts a structured `campaign` block that's serialized into the system
+// prompt so Claude has full awareness of party, locations, sessions.
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/dm-chat', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
+  try {
+    const { campaign, messages, model = 'claude-sonnet-4-6', max_tokens = 1500 } = req.body;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages array required' });
+    }
+
+    // Build a rich system prompt from the campaign structure. Claude needs:
+    // campaign name + session metadata + party + serialized locations + current-location focus.
+    const loc = campaign?.locations?.[campaign?.currentLocationId] || null;
+    const locationsDump = Object.entries(campaign?.locations || {})
+      .map(([id, l]) => {
+        const parts = [];
+        parts.push(`[${id}] ${l.name}${l.meta ? ' · ' + l.meta : ''}`);
+        if (l.readAloud) parts.push(`  READ-ALOUD: ${l.readAloud.replace(/\n/g, ' ')}`);
+        if (l.dmNote) parts.push(`  DM-NOTE: ${l.dmNote}`);
+        if (l.scenarios?.length) parts.push('  SZENARIEN: ' + l.scenarios.map(s => `"${s.title}" (${s.probability}): ${s.body}`).join(' | '));
+        if (l.dialogs?.length) parts.push('  DIALOGE: ' + l.dialogs.map(d => `${d.speaker}: ${d.text}`).join(' | '));
+        if (l.statblocks?.length) parts.push('  STATS: ' + l.statblocks.map(s => `${s.name} [${s.rows.map(r => r.join(': ')).join(', ')}]`).join(' | '));
+        if (l.history) parts.push(`  HISTORIE: ${l.history}`);
+        return parts.join('\n');
+      }).join('\n\n');
+
+    // Serialize characters in classic D&D 5e statblock format so Claude can reference exact
+    // stats, saves, attacks, resistances — same shape as SRD/Monster Manual entries.
+    const mod = s => Math.floor((s - 10) / 2);
+    const fmt = n => (n >= 0 ? '+' : '') + n;
+    const charsDump = (campaign?.characters || []).map(c => {
+      const tag = c.type === 'pc' ? 'PC' : 'NPC';
+      const lines = [];
+      lines.push(`═══ [${tag}] ${c.name} ═══`);
+      lines.push(`${c.size || 'Medium'} ${c.creatureType || c.race || ''}, ${c.alignment || 'unaligned'}`);
+      if (c.type === 'pc') lines.push(`${c.race || ''} ${c.class || ''} · Level ${c.level}`);
+      lines.push(`AC ${c.ac}${c.acType ? ` (${c.acType})` : ''} · HP ${c.hp}/${c.maxHp}${c.hitDice ? ` (${c.hitDice})` : ''} · Speed ${c.speed || '30 ft.'}`);
+      if (c.stats) {
+        const s = c.stats;
+        lines.push(`STR ${s.str}(${fmt(mod(s.str))}) DEX ${s.dex}(${fmt(mod(s.dex))}) CON ${s.con}(${fmt(mod(s.con))}) INT ${s.int}(${fmt(mod(s.int))}) WIS ${s.wis}(${fmt(mod(s.wis))}) CHA ${s.cha}(${fmt(mod(s.cha))})`);
+      }
+      if (c.savingThrows) lines.push(`Saving Throws: ${c.savingThrows}`);
+      if (c.skills) lines.push(`Skills: ${c.skills}`);
+      if (c.damageResistances) lines.push(`Damage Resistances: ${c.damageResistances}`);
+      if (c.damageImmunities) lines.push(`Damage Immunities: ${c.damageImmunities}`);
+      if (c.conditionImmunities) lines.push(`Condition Immunities: ${c.conditionImmunities}`);
+      if (c.senses) lines.push(`Senses: ${c.senses}`);
+      if (c.languages) lines.push(`Languages: ${c.languages}`);
+      if (c.type === 'npc' && c.cr) lines.push(`Challenge: ${c.cr}${c.xp ? ` (${c.xp} XP)` : ''}`);
+      const sec = (title, items) => {
+        if (!items?.length) return '';
+        return `\n${title}:\n` + items.map(it => `• ${it.name}: ${it.text}`).join('\n');
+      };
+      lines.push(sec('Traits', c.traits));
+      lines.push(sec('Actions', c.actions));
+      lines.push(sec('Bonus Actions', c.bonusActions));
+      lines.push(sec('Reactions', c.reactions));
+      lines.push(sec('Legendary Actions', c.legendaryActions));
+      if (c.backstory) lines.push(`\nBACKSTORY: ${c.backstory}`);
+      if (c.personality) lines.push(`PERSONALITY: ${c.personality}`);
+      if (c.notes) lines.push(`DM-NOTES: ${c.notes}`);
+      return lines.filter(l => l).join('\n');
+    }).join('\n\n\n');
+
+    // Serialize active combat state (HP + conditions per combatant)
+    const combatDump = (campaign?.combatState || []).map(e => {
+      const c = (campaign.characters || []).find(x => x.id === e.id); if (!c) return '';
+      const conds = e.conditions?.length ? ` · CONDITIONS: ${e.conditions.join(', ')}` : '';
+      return `  ${c.name}: HP ${e.hp}/${c.maxHp}${e.down ? ' (DOWN)' : ''}${conds}${e.turn ? ' [AKTIV AM ZUG]' : ''}`;
+    }).filter(l => l).join('\n');
+
+    const systemPrompt = `Du bist Co-DM für einen D&D-5e-Tisch. Antworte auf Deutsch, knapp, im Ton eines erfahrenen Storytellers.
+
+REGELN: D&D 5e SRD 5.1 (CC BY 4.0 WotC). Bei Regelfragen DC + Save-Type nennen. Niemals Spieler-Entscheidungen erfinden — du bist Helfer, nicht Spieler.
+
+FORMAT:
+• Vorlese-Texte: [READ_ALOUD: 2-4 Sätze atmosphärisch]
+• Bild-Vorschlag: [GENERATE_IMAGE: 60-100 Wörter, English, photorealistic fantasy]
+• **Fette Begriffe** für Namen/Regeln
+• Keine Floskeln, keine Meta-Kommentare
+
+KAMPAGNE: ${campaign?.name || 'Unbekannt'}${campaign?.session ? ` · S${campaign.session.number} ${campaign.session.title || ''} · Lvl ${campaign.session.level || '–'}` : ''}
+${campaign?.lastSessionRecap ? `\nLETZTER RECAP:\n${campaign.lastSessionRecap}\n` : ''}
+CHARAKTERE:
+${charsDump || '(keine)'}
+
+STANDORT: ${loc ? `${loc.name}${loc.meta ? ' · ' + loc.meta : ''}` : '(keiner)'}
+${loc?.readAloud ? `READ-ALOUD: ${loc.readAloud}` : ''}
+${loc?.dmNote ? `DM-NOTIZ: ${loc.dmNote}` : ''}
+${combatDump ? `\nKAMPF LIVE:\n${combatDump}` : ''}
+
+LOCATIONS-DB:
+${locationsDump || '(keine)'}
+`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model, max_tokens, system: systemPrompt, messages })
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (error) {
+    console.error('[dm-chat]', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DM STUDIO CLOUD SYNC — Supabase-backed state persistence for campaigns.
+// Email-based identity (Phase 1). Upsert on user_email + campaign_id unique pair.
+// Required table:
+//   CREATE TABLE dm_studio_state (
+//     id bigserial PRIMARY KEY,
+//     user_email text NOT NULL,
+//     campaign_id text NOT NULL,
+//     state_json jsonb NOT NULL,
+//     updated_at timestamptz DEFAULT now(),
+//     created_at timestamptz DEFAULT now(),
+//     UNIQUE(user_email, campaign_id)
+//   );
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/dm-studio/save', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { email, campaignId, state } = req.body;
+  if (!email || !campaignId) return res.status(400).json({ error: 'email + campaignId required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/dm_studio_state?on_conflict=user_email,campaign_id`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=representation'
+      },
+      body: JSON.stringify({ user_email: normalized, campaign_id: String(campaignId), state_json: state, updated_at: new Date().toISOString() })
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json({ error: data?.message || 'Supabase error', data });
+    res.json({ ok: true, updated_at: data?.[0]?.updated_at || new Date().toISOString() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/dm-studio/load', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { email, campaignId } = req.query;
+  if (!email || !campaignId) return res.status(400).json({ error: 'email + campaignId required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    const url = `${SUPABASE_URL}/rest/v1/dm_studio_state?user_email=eq.${encodeURIComponent(normalized)}&campaign_id=eq.${encodeURIComponent(campaignId)}&select=*&limit=1`;
+    const resp = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json({ error: data?.message || 'Supabase error' });
+    if (!Array.isArray(data) || !data.length) return res.json({ found: false });
+    res.json({ found: true, state: data[0].state_json, updated_at: data[0].updated_at });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/dm-studio/campaigns', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    const url = `${SUPABASE_URL}/rest/v1/dm_studio_state?user_email=eq.${encodeURIComponent(normalized)}&select=campaign_id,updated_at`;
+    const resp = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const data = await resp.json();
+    res.status(resp.status).json({ campaigns: Array.isArray(data) ? data : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PARTY ALBUM PHASE 2 — gemeinsames Album per Party-Code
+// Tables: parties, party_members (siehe supabase-migrations/002_parties.sql)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Helper: 8-12 chars Party-Code generieren — buchstaben+ziffern, leicht zu tippen, ohne 0/O/1/I.
+function generatePartyCode(seedName) {
+  const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const tokens = String(seedName || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 6);
+  let suffix = '';
+  for (let i = 0; i < 4; i++) suffix += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+  return (tokens || 'PARTY') + '-' + suffix;
+}
+
+// POST /api/parties/create — DM erstellt Party, kriegt Code zurück
+app.post('/api/parties/create', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { dmEmail, name, campaignId } = req.body;
+  if (!dmEmail || !name) return res.status(400).json({ error: 'dmEmail + name required' });
+  try {
+    const normalized = String(dmEmail).toLowerCase().trim();
+    // Bis zu 5 Versuche falls Code-Kollision
+    let lastErr = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = generatePartyCode(name);
+      const insertResp = await fetch(`${SUPABASE_URL}/rest/v1/parties`, {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=representation'
+        },
+        body: JSON.stringify({ code, name: String(name).slice(0, 80), dm_email: normalized, campaign_id: campaignId ? String(campaignId) : null })
+      });
+      const partyData = await insertResp.json();
+      if (insertResp.ok && partyData?.[0]?.id) {
+        const party = partyData[0];
+        // DM auch als Member eintragen
+        await fetch(`${SUPABASE_URL}/rest/v1/party_members`, {
+          method: 'POST',
+          headers: {
+            'apikey': SUPABASE_KEY,
+            'Authorization': `Bearer ${SUPABASE_KEY}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'resolution=merge-duplicates,return=minimal'
+          },
+          body: JSON.stringify({ party_id: party.id, email: normalized, role: 'dm', display_name: 'DM' })
+        });
+        return res.json({ ok: true, party });
+      }
+      lastErr = partyData?.message || 'unknown';
+      // 23505 = unique violation → Code-Kollision → nochmal probieren
+      if (!/duplicate|unique/i.test(lastErr)) break;
+    }
+    res.status(500).json({ error: 'Could not create party', detail: lastErr });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/parties/join — Spieler tritt via Code bei
+app.post('/api/parties/join', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { code, email, displayName } = req.body;
+  if (!code || !email) return res.status(400).json({ error: 'code + email required' });
+  try {
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const normalizedCode = String(code).toUpperCase().trim();
+    // Find party by code (case-insensitive)
+    const findUrl = `${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(normalizedCode)}&select=*&limit=1`;
+    const findResp = await fetch(findUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const parties = await findResp.json();
+    if (!findResp.ok) return res.status(findResp.status).json({ error: parties?.message || 'Lookup failed' });
+    if (!Array.isArray(parties) || !parties.length) return res.status(404).json({ error: 'Code nicht gefunden' });
+    const party = parties[0];
+    // Add as member (idempotent via UNIQUE constraint)
+    const insertResp = await fetch(`${SUPABASE_URL}/rest/v1/party_members?on_conflict=party_id,email`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=representation'
+      },
+      body: JSON.stringify({ party_id: party.id, email: normalizedEmail, role: 'player', display_name: (displayName || '').slice(0, 60) || null })
+    });
+    const memberData = await insertResp.json();
+    if (!insertResp.ok) return res.status(insertResp.status).json({ error: memberData?.message || 'Join failed' });
+    res.json({ ok: true, party, member: memberData?.[0] || memberData });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/parties/list?email= — alle Parties einer Email
+app.get('/api/parties/list', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    // Get all party_member rows for this email, joined with parties
+    const url = `${SUPABASE_URL}/rest/v1/party_members?email=eq.${encodeURIComponent(normalized)}&select=role,display_name,joined_at,parties(id,code,name,dm_email,campaign_id,created_at)`;
+    const resp = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json({ error: data?.message || 'List failed' });
+    res.json({ parties: Array.isArray(data) ? data : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/parties/:code/members — alle Members einer Party
+app.get('/api/parties/:code/members', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const code = String(req.params.code || '').toUpperCase().trim();
+  try {
+    const findResp = await fetch(`${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(code)}&select=id,name,dm_email&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const parties = await findResp.json();
+    if (!Array.isArray(parties) || !parties.length) return res.status(404).json({ error: 'Code nicht gefunden' });
+    const party = parties[0];
+    const memResp = await fetch(`${SUPABASE_URL}/rest/v1/party_members?party_id=eq.${party.id}&select=email,role,display_name,joined_at&order=joined_at.asc`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const members = await memResp.json();
+    res.json({ party, members: Array.isArray(members) ? members : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ───────── PARTY-MILESTONES ─────────
+// Schwellen + Beschreibungen. Backend setzt Achievements automatisch wenn erreicht.
+const PARTY_MILESTONES = [
+  { key: 'first_card',      threshold: 1,   name: 'Erste Erinnerung',     desc: 'Eure erste Karte' },
+  { key: '5_cards',         threshold: 5,   name: 'Geteilte Geschichten', desc: 'Fünf Karten gemeinsam' },
+  { key: '10_nights',       threshold: 10,  name: '10 Nights Together',   desc: 'Eine echte Party — exklusive Karte freigeschaltet' },
+  { key: '25_legends',      threshold: 25,  name: '25 Legenden',          desc: 'Eure Geschichte hat Tiefe' },
+  { key: '50_chronicles',   threshold: 50,  name: '50 Chronicles',        desc: 'Eine Saga' },
+  { key: '100_immortal',    threshold: 100, name: 'Immortal Table',       desc: 'Hall-of-Fame-würdig' }
+];
+
+function computeUnlocks(cardCount) {
+  return PARTY_MILESTONES.filter(m => cardCount >= m.threshold).map(m => m.key);
+}
+
+function progressTowardNext(cardCount, currentUnlocks) {
+  const next = PARTY_MILESTONES.find(m => !currentUnlocks.includes(m.key));
+  if (!next) return null;
+  return {
+    next: next.key,
+    nextName: next.name,
+    nextDesc: next.desc,
+    threshold: next.threshold,
+    have: cardCount,
+    remaining: Math.max(0, next.threshold - cardCount)
+  };
+}
+
+// GET /api/parties/milestones — statische Liste (für Frontend)
+app.get('/api/parties/milestones', (req, res) => {
+  res.json({ milestones: PARTY_MILESTONES });
+});
+
+// GET /api/parties/:code/sessions — alle Karten/Sessions die Party-Members erstellt haben
+// Aggregiert über alle Member-Emails → ihre Sessions aus der `sessions` table → ein gemeinsames Album.
+// Berechnet zusätzlich Unlocks basierend auf Total-Card-Count und persistiert sie.
+app.get('/api/parties/:code/sessions', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const code = String(req.params.code || '').toUpperCase().trim();
+  try {
+    const findResp = await fetch(`${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(code)}&select=id,name,dm_email,unlocks,card_count&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const parties = await findResp.json();
+    if (!Array.isArray(parties) || !parties.length) return res.status(404).json({ error: 'Code nicht gefunden' });
+    const party = parties[0];
+
+    // Members holen
+    const memResp = await fetch(`${SUPABASE_URL}/rest/v1/party_members?party_id=eq.${party.id}&select=email,display_name,role`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const members = await memResp.json();
+    const emails = Array.isArray(members) ? members.map(m => m.email) : [];
+    if (!emails.length) return res.json({ party, members: [], sessions: [], cards: [], unlocks: party.unlocks || [], progress: progressTowardNext(0, party.unlocks || []), milestones: PARTY_MILESTONES });
+
+    // Owner-Slugs für jede Email berechnen
+    const slugByEmail = Object.fromEntries(emails.map(e => [e, emailToSlug(e)]));
+    const slugs = Object.values(slugByEmail);
+
+    // Sessions holen — aktuell hat sessions.owner_slug? Falls nicht, fallback auf cards.
+    // Wir versuchen erst sessions, dann cards.
+    let allSessions = [];
+    try {
+      const sessUrl = `${SUPABASE_URL}/rest/v1/sessions?owner_slug=in.(${slugs.map(s => '"' + s + '"').join(',')})&select=*&order=created_at.desc&limit=200`;
+      const sessResp = await fetch(sessUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+      if (sessResp.ok) {
+        const sessData = await sessResp.json();
+        if (Array.isArray(sessData)) allSessions = sessData;
+      }
+    } catch (e) { /* sessions table missing owner_slug → ignore */ }
+
+    // Cards-Tabelle als Fallback / Ergänzung
+    let cards = [];
+    try {
+      const cardsUrl = `${SUPABASE_URL}/rest/v1/cards?owner_slug=in.(${slugs.map(s => '"' + s + '"').join(',')})&select=id,number,session_title,legendary_moment,character_name,character_class,rarity,image_url,owner_slug,created_at&order=created_at.desc&limit=200`;
+      const cardsResp = await fetch(cardsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+      if (cardsResp.ok) {
+        const cardsData = await cardsResp.json();
+        if (Array.isArray(cardsData)) cards = cardsData;
+      }
+    } catch (e) { /* cards table missing owner_slug → ignore */ }
+
+    // Display-Name reverse-lookup
+    const dnBySlug = {};
+    members.forEach(m => { dnBySlug[slugByEmail[m.email]] = m.display_name || (m.role === 'dm' ? 'DM' : 'Spieler'); });
+    allSessions.forEach(s => { s._memberName = dnBySlug[s.owner_slug] || ''; });
+    cards.forEach(c => { c._memberName = dnBySlug[c.owner_slug] || ''; });
+
+    // Unique Card-Count via ID-Set (Sessions+Cards können dieselben IDs haben)
+    const uniqueIds = new Set();
+    allSessions.forEach(s => s.id && uniqueIds.add(s.id));
+    cards.forEach(c => c.id && uniqueIds.add(c.id));
+    const cardCount = uniqueIds.size;
+
+    // Unlocks berechnen + persistieren falls neue dazukamen
+    const computedUnlocks = computeUnlocks(cardCount);
+    const existingUnlocks = Array.isArray(party.unlocks) ? party.unlocks : [];
+    const newlyUnlocked = computedUnlocks.filter(k => !existingUnlocks.includes(k));
+    const finalUnlocks = [...new Set([...existingUnlocks, ...computedUnlocks])];
+
+    if (newlyUnlocked.length || party.card_count !== cardCount) {
+      try {
+        await fetch(`${SUPABASE_URL}/rest/v1/parties?id=eq.${party.id}`, {
+          method: 'PATCH',
+          headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ unlocks: finalUnlocks, card_count: cardCount })
+        });
+      } catch (e) { console.warn('[parties] unlock persist failed:', e.message); }
+    }
+
+    const progress = progressTowardNext(cardCount, finalUnlocks);
+
+    res.json({
+      party: { ...party, unlocks: finalUnlocks, card_count: cardCount },
+      members, sessions: allSessions, cards,
+      cardCount,
+      unlocks: finalUnlocks,
+      newlyUnlocked,
+      progress,
+      milestones: PARTY_MILESTONES
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/parties/:code/leave — Member verlässt Party (Self-Service)
+app.post('/api/parties/:code/leave', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const code = String(req.params.code || '').toUpperCase().trim();
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    const findResp = await fetch(`${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(code)}&select=id,dm_email&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const parties = await findResp.json();
+    if (!Array.isArray(parties) || !parties.length) return res.status(404).json({ error: 'Code nicht gefunden' });
+    const party = parties[0];
+    if (party.dm_email === normalized) return res.status(400).json({ error: 'DM kann nicht austreten — Party muss gelöscht werden' });
+    const delResp = await fetch(`${SUPABASE_URL}/rest/v1/party_members?party_id=eq.${party.id}&email=eq.${encodeURIComponent(normalized)}`, {
+      method: 'DELETE',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    res.json({ ok: delResp.ok });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HALL OF FAME — Voting + Trending-Mechanik (SQL: 004_hall_of_fame.sql)
+// ═══════════════════════════════════════════════════════════════════════════
+
+app.post('/api/cards/:id/vote', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const cardId = String(req.params.id || '').trim();
+  const { email, vote } = req.body;
+  if (!cardId || !email) return res.status(400).json({ error: 'cardId + email required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    const v = vote === 0 ? 0 : 1;
+    const upsertResp = await fetch(`${SUPABASE_URL}/rest/v1/card_votes?on_conflict=card_id,voter_email`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=minimal'
+      },
+      body: JSON.stringify({ card_id: cardId, voter_email: normalized, vote: v })
+    });
+    if (!upsertResp.ok) {
+      const txt = await upsertResp.text();
+      return res.status(upsertResp.status).json({ error: txt.slice(0, 300) });
+    }
+    const statsResp = await fetch(`${SUPABASE_URL}/rest/v1/card_stats?card_id=eq.${encodeURIComponent(cardId)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const stats = await statsResp.json();
+    res.json({ ok: true, stats: Array.isArray(stats) ? stats[0] || null : null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/cards/:id/votes', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const cardId = String(req.params.id || '').trim();
+  const { email } = req.query;
+  try {
+    const statsResp = await fetch(`${SUPABASE_URL}/rest/v1/card_stats?card_id=eq.${encodeURIComponent(cardId)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const statsArr = await statsResp.json();
+    const stats = Array.isArray(statsArr) ? statsArr[0] || { vote_count: 0, trending_score: 0 } : { vote_count: 0, trending_score: 0 };
+    let myVote = 0;
+    if (email) {
+      const normalized = String(email).toLowerCase().trim();
+      const myResp = await fetch(`${SUPABASE_URL}/rest/v1/card_votes?card_id=eq.${encodeURIComponent(cardId)}&voter_email=eq.${encodeURIComponent(normalized)}&select=vote&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+      const my = await myResp.json();
+      if (Array.isArray(my) && my.length) myVote = my[0].vote || 0;
+    }
+    res.json({ stats, myVote });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/hall-of-fame/trending', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+  const sort = req.query.sort === 'all-time' ? 'vote_count' : 'trending_score';
+  try {
+    const statsUrl = `${SUPABASE_URL}/rest/v1/card_stats?select=card_id,vote_count,trending_score&order=${sort}.desc&limit=${limit}`;
+    const statsResp = await fetch(statsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const stats = await statsResp.json();
+    if (!Array.isArray(stats) || !stats.length) return res.json({ cards: [] });
+    const ids = stats.map(s => s.card_id);
+    const fetchByIds = async (table) => {
+      try {
+        const url = `${SUPABASE_URL}/rest/v1/${table}?id=in.(${ids.map(i => '"' + i + '"').join(',')})&select=*`;
+        const r = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+        const d = await r.json();
+        return Array.isArray(d) ? d : [];
+      } catch (e) { return []; }
+    };
+    const sess = await fetchByIds('sessions');
+    const cards = await fetchByIds('cards');
+    const cardById = {};
+    sess.forEach(s => { cardById[s.id] = { ...s, _source: 'session' }; });
+    cards.forEach(c => { if (!cardById[c.id]) cardById[c.id] = { ...c, _source: 'card' }; });
+    const rarityFilter = req.query.rarity ? String(req.query.rarity).toLowerCase().split(',') : null;
+    let result = stats.map(s => {
+      const c = cardById[s.card_id];
+      if (!c) return null;
+      if (rarityFilter && rarityFilter.length && !rarityFilter.includes((c.rarity || 'common').toLowerCase())) return null;
+      return { ...c, _stats: { vote_count: s.vote_count, trending_score: s.trending_score } };
+    }).filter(Boolean);
+    res.json({ cards: result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/hall-of-fame/recompute', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  try {
+    const allResp = await fetch(`${SUPABASE_URL}/rest/v1/card_stats?select=card_id,vote_count`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const all = await allResp.json();
+    if (!Array.isArray(all)) return res.status(500).json({ error: 'Cannot read card_stats' });
+    let updated = 0;
+    for (const row of all) {
+      let createdAt = null;
+      const sessR = await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${encodeURIComponent(row.card_id)}&select=created_at&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+      const sess = await sessR.json();
+      if (Array.isArray(sess) && sess.length) createdAt = sess[0].created_at;
+      if (!createdAt) {
+        const cardR = await fetch(`${SUPABASE_URL}/rest/v1/cards?id=eq.${encodeURIComponent(row.card_id)}&select=created_at&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+        const card = await cardR.json();
+        if (Array.isArray(card) && card.length) createdAt = card[0].created_at;
+      }
+      const ageDays = createdAt ? (Date.now() - new Date(createdAt).getTime()) / 86400000 : 0;
+      const score = (row.vote_count || 0) * Math.exp(-ageDays / 7);
+      await fetch(`${SUPABASE_URL}/rest/v1/card_stats?card_id=eq.${encodeURIComponent(row.card_id)}`, {
+        method: 'PATCH',
+        headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trending_score: score, updated_at: new Date().toISOString() })
+      });
+      updated++;
+    }
+    res.json({ ok: true, updated });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/image', async (req, res) => {
   try {
     const { prompt, model = 'flux-pro', width, height, aspect_ratio } = req.body;
