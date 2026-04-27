@@ -140,46 +140,28 @@ app.post('/api/dm-chat', async (req, res) => {
       return `  ${c.name}: HP ${e.hp}/${c.maxHp}${e.down ? ' (DOWN)' : ''}${conds}${e.turn ? ' [AKTIV AM ZUG]' : ''}`;
     }).filter(l => l).join('\n');
 
-    const systemPrompt = `Du bist der KI-Co-DM für einen D&D-5e-Tisch. Du hast vollständigen Zugriff auf die Kampagne, Party und Session-Historie. Antworte immer auf Deutsch, im Ton eines erfahrenen Storytellers.
+    const systemPrompt = `Du bist Co-DM für einen D&D-5e-Tisch. Antworte auf Deutsch, knapp, im Ton eines erfahrenen Storytellers.
 
-REGELWERK: D&D 5e. Nutze die offiziellen SRD-5.1-Regeln (CC BY 4.0 Wizards of the Coast) für Conditions, Ability Checks, Saves, Action Economy, Combat, Spells. Wenn ein Spieler etwas versucht, referenziere die relevante Regel (DC, Save Type, Action Type).
+REGELN: D&D 5e SRD 5.1 (CC BY 4.0 WotC). Bei Regelfragen DC + Save-Type nennen. Niemals Spieler-Entscheidungen erfinden — du bist Helfer, nicht Spieler.
 
-DEINE AUFGABEN:
-• Improvisiere NPC-Dialoge und Reaktionen im Stil der Welt
-• Schlage plausible Konsequenzen von Party-Aktionen vor
-• Generiere Vorlese-Texte (atmosphärisch, 2-4 Sätze) — umschließe sie mit [READ_ALOUD: ...]
-• Bewahre Welt-Konsistenz mit bisherigen Sessions
-• Gib Statblock- und Regelauskünfte präzise
-• Hilf bei Session-Vorbereitung
+FORMAT:
+• Vorlese-Texte: [READ_ALOUD: 2-4 Sätze atmosphärisch]
+• Bild-Vorschlag: [GENERATE_IMAGE: 60-100 Wörter, English, photorealistic fantasy]
+• **Fette Begriffe** für Namen/Regeln
+• Keine Floskeln, keine Meta-Kommentare
 
-ANTWORT-FORMAT:
-• Knapp und DM-orientiert — keine Meta-Kommentare, keine Floskeln
-• Vorlese-Text immer im Format: [READ_ALOUD: Der atmosphärische Text hier.] — wird als eigener Block gerendert
-• Wenn ein Bild helfen würde: [GENERATE_IMAGE: photorealistic fantasy prompt in English, 60-100 words]
-• Nutze **fette** Wörter für Namen und Regel-Begriffe
-• Referenziere Party-Mitglieder beim Namen (mit ihren Klassen-Schwächen) und NPCs mit ihrer Persönlichkeit
-• Niemals Spieler-Entscheidungen erfinden — du bist der DM-Helfer, nicht der Spieler
+KAMPAGNE: ${campaign?.name || 'Unbekannt'}${campaign?.session ? ` · S${campaign.session.number} ${campaign.session.title || ''} · Lvl ${campaign.session.level || '–'}` : ''}
+${campaign?.lastSessionRecap ? `\nLETZTER RECAP:\n${campaign.lastSessionRecap}\n` : ''}
+CHARAKTERE:
+${charsDump || '(keine)'}
 
-KAMPAGNE: ${campaign?.name || 'Unbekannt'}
-${campaign?.session ? `SESSION ${campaign.session.number} · ${campaign.session.title} · Level ${campaign.session.level}` : ''}
+STANDORT: ${loc ? `${loc.name}${loc.meta ? ' · ' + loc.meta : ''}` : '(keiner)'}
+${loc?.readAloud ? `READ-ALOUD: ${loc.readAloud}` : ''}
+${loc?.dmNote ? `DM-NOTIZ: ${loc.dmNote}` : ''}
+${combatDump ? `\nKAMPF LIVE:\n${combatDump}` : ''}
 
-${campaign?.lastSessionRecap ? `RECAP DER LETZTEN SESSION:
-${campaign.lastSessionRecap}
-` : ''}
-
-CHARAKTERE (Party + NPCs):
-${charsDump || '(keine Charaktere angelegt)'}
-
-AKTUELLER STANDORT: ${loc ? `${loc.name}${loc.meta ? ' · ' + loc.meta : ''}` : 'Kein Standort ausgewählt'}
-${loc?.readAloud ? `AKTUELLER VORLESE-TEXT: ${loc.readAloud}` : ''}
-${loc?.dmNote ? `DM-NOTIZ ZUM AKTUELLEN STANDORT: ${loc.dmNote}` : ''}
-
-${combatDump ? `AKTIVER KAMPF — LIVE STATUS:
-${combatDump}
-` : ''}
-
-VOLLSTÄNDIGE KAMPAGNEN-DATENBANK (alle Locations):
-${locationsDump || '(keine Locations dokumentiert)'}
+LOCATIONS-DB:
+${locationsDump || '(keine)'}
 `;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
