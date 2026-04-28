@@ -589,21 +589,172 @@ app.get('/api/hall-of-fame/trending', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// CHARAKTER-EINLADUNGEN — Magic-Links pro Charakter (ersetzt Party-Codes)
+// SQL: 006_character_invites.sql
+// ═══════════════════════════════════════════════════════════════════════════
+
+function makeInviteToken() {
+  // 12-char URL-safe random
+  return 'inv_' + crypto.randomBytes(9).toString('base64')
+    .replace(/\+/g, '').replace(/\//g, '').replace(/=/g, '').slice(0, 12);
+}
+
+function campaignRoom(dmEmail, campaignId) {
+  return `${String(dmEmail).toLowerCase().trim()}::${campaignId}`;
+}
+
+// POST /api/invites/create — DM oder Spieler erstellt eine Einladung
+// Body: { campaignId, dmEmail, characterId, characterName, characterMeta, role, invitedBy, expiresInDays }
+app.post('/api/invites/create', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { campaignId, dmEmail, characterId, characterName, characterMeta, role, invitedBy, expiresInDays } = req.body;
+  if (!campaignId || !dmEmail || !invitedBy) return res.status(400).json({ error: 'campaignId + dmEmail + invitedBy required' });
+  try {
+    const token = makeInviteToken();
+    const expires = expiresInDays ? new Date(Date.now() + expiresInDays * 86400000).toISOString() : null;
+    const body = {
+      token,
+      campaign_id: String(campaignId),
+      dm_email: String(dmEmail).toLowerCase().trim(),
+      character_id: characterId || null,
+      character_name: (characterName || '').slice(0, 100) || null,
+      character_meta: (characterMeta || '').slice(0, 200) || null,
+      role: role === 'dm' ? 'dm' : 'player',
+      invited_by: String(invitedBy).toLowerCase().trim(),
+      expires_at: expires
+    };
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/character_invites`, {
+      method: 'POST',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json({ error: data?.message || 'Create failed' });
+    res.json({ ok: true, invite: Array.isArray(data) ? data[0] : data });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/invites/:token — Einladung abrufen (Vorschau für Player-Landing)
+app.get('/api/invites/:token', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const token = String(req.params.token || '').trim();
+  try {
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const data = await resp.json();
+    if (!Array.isArray(data) || !data.length) return res.status(404).json({ error: 'Invite nicht gefunden' });
+    const inv = data[0];
+    if (inv.expires_at && new Date(inv.expires_at) < new Date()) {
+      return res.status(410).json({ error: 'Invite abgelaufen' });
+    }
+    res.json({ invite: inv });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/invites/:token/accept — Spieler akzeptiert Einladung
+// Body: { email }
+app.post('/api/invites/:token/accept', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const token = String(req.params.token || '').trim();
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    // Invite holen
+    const findResp = await fetch(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const invs = await findResp.json();
+    if (!Array.isArray(invs) || !invs.length) return res.status(404).json({ error: 'Invite nicht gefunden' });
+    const inv = invs[0];
+    if (inv.expires_at && new Date(inv.expires_at) < new Date()) return res.status(410).json({ error: 'Invite abgelaufen' });
+    // Member upsert
+    const memBody = {
+      campaign_id: inv.campaign_id,
+      dm_email: inv.dm_email,
+      member_email: normalized,
+      member_role: inv.role,
+      character_id: inv.character_id || null,
+      character_name: inv.character_name || null
+    };
+    const memResp = await fetch(`${SUPABASE_URL}/rest/v1/campaign_members?on_conflict=campaign_id,dm_email,member_email`, {
+      method: 'POST',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      body: JSON.stringify(memBody)
+    });
+    const memData = await memResp.json();
+    // Invite als used markieren (nicht-blockierend)
+    if (!inv.used_by) {
+      await fetch(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}`, {
+        method: 'PATCH',
+        headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ used_by: normalized, used_at: new Date().toISOString() })
+      });
+    }
+    res.json({
+      ok: true,
+      invite: inv,
+      member: Array.isArray(memData) ? memData[0] : memData,
+      campaignRoom: campaignRoom(inv.dm_email, inv.campaign_id)
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/invites/by-campaign/:dmEmailHash/:campaignId — Liste aktiver Invites
+// (Nur für DM-Studio-View — pendingPlayerSlots)
+app.get('/api/invites/by-campaign', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { dmEmail, campaignId } = req.query;
+  if (!dmEmail || !campaignId) return res.status(400).json({ error: 'dmEmail + campaignId required' });
+  try {
+    const dm = String(dmEmail).toLowerCase().trim();
+    const url = `${SUPABASE_URL}/rest/v1/character_invites?dm_email=eq.${encodeURIComponent(dm)}&campaign_id=eq.${encodeURIComponent(campaignId)}&select=*&order=created_at.desc`;
+    const resp = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const data = await resp.json();
+    res.json({ invites: Array.isArray(data) ? data : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/campaigns/by-member?email= — alle Kampagnen denen User beigetreten ist
+app.get('/api/campaigns/by-member', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  try {
+    const normalized = String(email).toLowerCase().trim();
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/campaign_members?member_email=eq.${encodeURIComponent(normalized)}&select=*&order=joined_at.desc`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const data = await resp.json();
+    res.json({ memberships: Array.isArray(data) ? data : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/invites/:token/revoke — DM löscht eine offene Einladung
+app.post('/api/invites/:token/revoke', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const token = String(req.params.token || '').trim();
+  try {
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}`, {
+      method: 'DELETE',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    res.json({ ok: resp.ok });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // LIVE MULTIPLAYER DICE — DM Studio + Player View shared roll-stream
 // SQL: 005_live_dice.sql · Realtime-Subscriptions via Supabase Realtime
 // ═══════════════════════════════════════════════════════════════════════════
 
-// POST /api/live/request — DM erstellt eine Würfel-Anfrage für die Party
+// POST /api/live/request — DM erstellt eine Würfel-Anfrage
+// Scope: entweder partyCode (Legacy) ODER campaignRoom (neu, "dm_email::campaign_id")
 app.post('/api/live/request', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
-  const { partyCode, dmEmail, prompt, statType, dc, targetEmails, visibility, expiresInSec } = req.body;
-  if (!partyCode || !dmEmail || !prompt) return res.status(400).json({ error: 'partyCode + dmEmail + prompt required' });
+  const { partyCode, campaignRoom: room, dmEmail, prompt, statType, dc, targetEmails, visibility, expiresInSec } = req.body;
+  if (!dmEmail || !prompt || (!partyCode && !room)) return res.status(400).json({ error: '(partyCode|campaignRoom) + dmEmail + prompt required' });
   try {
-    const code = String(partyCode).toUpperCase().trim();
     const normalized = String(dmEmail).toLowerCase().trim();
     const expiresAt = expiresInSec ? new Date(Date.now() + expiresInSec * 1000).toISOString() : null;
     const body = {
-      party_code: code,
+      party_code: partyCode ? String(partyCode).toUpperCase().trim() : ('CAMPAIGN_' + (room || '').slice(0, 50)),
+      campaign_room: room || null,
       dm_email: normalized,
       prompt: String(prompt).slice(0, 200),
       stat_type: statType || null,
@@ -630,12 +781,12 @@ app.post('/api/live/request', async (req, res) => {
 
 // POST /api/live/roll — Spieler postet einen Würfelwurf
 // Wenn requestId angegeben: Antwort auf einen DM-Request, sonst spontaner Roll.
+// Scope: partyCode (Legacy) ODER campaignRoom (neu)
 app.post('/api/live/roll', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
-  const { partyCode, playerEmail, playerName, characterName, stat, modifier, d20, dc, requestId, visibility } = req.body;
-  if (!partyCode || !playerEmail || d20 == null) return res.status(400).json({ error: 'partyCode + playerEmail + d20 required' });
+  const { partyCode, campaignRoom: room, playerEmail, playerName, characterName, stat, modifier, d20, dc, requestId, visibility } = req.body;
+  if (!playerEmail || d20 == null || (!partyCode && !room)) return res.status(400).json({ error: '(partyCode|campaignRoom) + playerEmail + d20 required' });
   try {
-    const code = String(partyCode).toUpperCase().trim();
     const normalized = String(playerEmail).toLowerCase().trim();
     const d = Math.max(1, Math.min(20, parseInt(d20) || 0));
     const m = parseInt(modifier) || 0;
@@ -647,7 +798,8 @@ app.post('/api/live/roll', async (req, res) => {
     else if (dcVal != null) resultKind = total >= dcVal ? 'success' : 'fail';
 
     const body = {
-      party_code: code,
+      party_code: partyCode ? String(partyCode).toUpperCase().trim() : ('CAMPAIGN_' + (room || '').slice(0, 50)),
+      campaign_room: room || null,
       request_id: requestId ? parseInt(requestId) : null,
       player_email: normalized,
       player_name: (playerName || '').slice(0, 60) || null,
@@ -677,13 +829,23 @@ app.post('/api/live/roll', async (req, res) => {
 });
 
 // GET /api/live/stream/:partyCode — letzte 50 Rolls + offene Requests
+// Akzeptiert auch ?room=... als alternativer Scope für campaign_room.
 app.get('/api/live/stream/:partyCode', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
   const code = String(req.params.partyCode || '').toUpperCase().trim();
+  const room = req.query.room || null;
   try {
-    const rollsResp = await fetch(`${SUPABASE_URL}/rest/v1/live_rolls?party_code=eq.${encodeURIComponent(code)}&select=*&order=created_at.desc&limit=50`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    let rollsUrl, reqsUrl;
+    if (room) {
+      rollsUrl = `${SUPABASE_URL}/rest/v1/live_rolls?campaign_room=eq.${encodeURIComponent(room)}&select=*&order=created_at.desc&limit=50`;
+      reqsUrl  = `${SUPABASE_URL}/rest/v1/roll_requests?campaign_room=eq.${encodeURIComponent(room)}&resolved_at=is.null&select=*&order=created_at.desc&limit=20`;
+    } else {
+      rollsUrl = `${SUPABASE_URL}/rest/v1/live_rolls?party_code=eq.${encodeURIComponent(code)}&select=*&order=created_at.desc&limit=50`;
+      reqsUrl  = `${SUPABASE_URL}/rest/v1/roll_requests?party_code=eq.${encodeURIComponent(code)}&resolved_at=is.null&select=*&order=created_at.desc&limit=20`;
+    }
+    const rollsResp = await fetch(rollsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const rolls = await rollsResp.json();
-    const reqResp = await fetch(`${SUPABASE_URL}/rest/v1/roll_requests?party_code=eq.${encodeURIComponent(code)}&resolved_at=is.null&select=*&order=created_at.desc&limit=20`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const reqResp = await fetch(reqsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const requests = await reqResp.json();
     res.json({
       rolls: Array.isArray(rolls) ? rolls : [],
