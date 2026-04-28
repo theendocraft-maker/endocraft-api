@@ -588,6 +588,129 @@ app.get('/api/hall-of-fame/trending', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LIVE MULTIPLAYER DICE — DM Studio + Player View shared roll-stream
+// SQL: 005_live_dice.sql · Realtime-Subscriptions via Supabase Realtime
+// ═══════════════════════════════════════════════════════════════════════════
+
+// POST /api/live/request — DM erstellt eine Würfel-Anfrage für die Party
+app.post('/api/live/request', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { partyCode, dmEmail, prompt, statType, dc, targetEmails, visibility, expiresInSec } = req.body;
+  if (!partyCode || !dmEmail || !prompt) return res.status(400).json({ error: 'partyCode + dmEmail + prompt required' });
+  try {
+    const code = String(partyCode).toUpperCase().trim();
+    const normalized = String(dmEmail).toLowerCase().trim();
+    const expiresAt = expiresInSec ? new Date(Date.now() + expiresInSec * 1000).toISOString() : null;
+    const body = {
+      party_code: code,
+      dm_email: normalized,
+      prompt: String(prompt).slice(0, 200),
+      stat_type: statType || null,
+      dc: dc != null ? parseInt(dc) : null,
+      target_emails: Array.isArray(targetEmails) && targetEmails.length ? targetEmails.map(e => String(e).toLowerCase().trim()) : null,
+      visibility: visibility === 'dm_only' ? 'dm_only' : 'public',
+      expires_at: expiresAt
+    };
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/roll_requests`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json({ error: data?.message || 'Request failed', detail: data });
+    res.json({ ok: true, request: Array.isArray(data) ? data[0] : data });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/live/roll — Spieler postet einen Würfelwurf
+// Wenn requestId angegeben: Antwort auf einen DM-Request, sonst spontaner Roll.
+app.post('/api/live/roll', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const { partyCode, playerEmail, playerName, characterName, stat, modifier, d20, dc, requestId, visibility } = req.body;
+  if (!partyCode || !playerEmail || d20 == null) return res.status(400).json({ error: 'partyCode + playerEmail + d20 required' });
+  try {
+    const code = String(partyCode).toUpperCase().trim();
+    const normalized = String(playerEmail).toLowerCase().trim();
+    const d = Math.max(1, Math.min(20, parseInt(d20) || 0));
+    const m = parseInt(modifier) || 0;
+    const total = d + m;
+    const dcVal = dc != null ? parseInt(dc) : null;
+    let resultKind = null;
+    if (d === 20) resultKind = 'crit-success';
+    else if (d === 1) resultKind = 'crit-fail';
+    else if (dcVal != null) resultKind = total >= dcVal ? 'success' : 'fail';
+
+    const body = {
+      party_code: code,
+      request_id: requestId ? parseInt(requestId) : null,
+      player_email: normalized,
+      player_name: (playerName || '').slice(0, 60) || null,
+      character_name: (characterName || '').slice(0, 60) || null,
+      stat: stat ? String(stat).slice(0, 20) : null,
+      modifier: m,
+      d20: d,
+      total,
+      dc: dcVal,
+      result_kind: resultKind,
+      visibility: visibility === 'dm_only' ? 'dm_only' : 'public'
+    };
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/live_rolls`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+      },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json({ error: data?.message || 'Roll failed' });
+    res.json({ ok: true, roll: Array.isArray(data) ? data[0] : data });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/live/stream/:partyCode — letzte 50 Rolls + offene Requests
+app.get('/api/live/stream/:partyCode', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const code = String(req.params.partyCode || '').toUpperCase().trim();
+  try {
+    const rollsResp = await fetch(`${SUPABASE_URL}/rest/v1/live_rolls?party_code=eq.${encodeURIComponent(code)}&select=*&order=created_at.desc&limit=50`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const rolls = await rollsResp.json();
+    const reqResp = await fetch(`${SUPABASE_URL}/rest/v1/roll_requests?party_code=eq.${encodeURIComponent(code)}&resolved_at=is.null&select=*&order=created_at.desc&limit=20`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const requests = await reqResp.json();
+    res.json({
+      rolls: Array.isArray(rolls) ? rolls : [],
+      openRequests: Array.isArray(requests) ? requests : []
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/live/request/:id/cancel — DM cancelt eine offene Request
+app.post('/api/live/request/:id/cancel', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'invalid id' });
+  try {
+    const resp = await fetch(`${SUPABASE_URL}/rest/v1/roll_requests?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ resolved_at: new Date().toISOString() })
+    });
+    res.json({ ok: resp.ok });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/hall-of-fame/recompute', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
   try {
