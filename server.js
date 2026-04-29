@@ -589,6 +589,144 @@ app.get('/api/hall-of-fame/trending', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ENCOUNTER BUILDER — AI-generated balanced encounters mit SRD Statblöcken
+// ═══════════════════════════════════════════════════════════════════════════
+
+// XP-Thresholds aus DMG (per character)
+const XP_THRESHOLDS = {
+  1:  { easy: 25,   medium: 50,    hard: 75,    deadly: 100   },
+  2:  { easy: 50,   medium: 100,   hard: 150,   deadly: 200   },
+  3:  { easy: 75,   medium: 150,   hard: 225,   deadly: 400   },
+  4:  { easy: 125,  medium: 250,   hard: 375,   deadly: 500   },
+  5:  { easy: 250,  medium: 500,   hard: 750,   deadly: 1100  },
+  6:  { easy: 300,  medium: 600,   hard: 900,   deadly: 1400  },
+  7:  { easy: 350,  medium: 750,   hard: 1100,  deadly: 1700  },
+  8:  { easy: 450,  medium: 900,   hard: 1400,  deadly: 2100  },
+  9:  { easy: 550,  medium: 1100,  hard: 1600,  deadly: 2400  },
+  10: { easy: 600,  medium: 1200,  hard: 1900,  deadly: 2800  },
+  11: { easy: 800,  medium: 1600,  hard: 2400,  deadly: 3600  },
+  12: { easy: 1000, medium: 2000,  hard: 3000,  deadly: 4500  },
+  13: { easy: 1100, medium: 2200,  hard: 3400,  deadly: 5100  },
+  14: { easy: 1250, medium: 2500,  hard: 3800,  deadly: 5700  },
+  15: { easy: 1400, medium: 2800,  hard: 4300,  deadly: 6400  },
+  16: { easy: 1600, medium: 3200,  hard: 4800,  deadly: 7200  },
+  17: { easy: 2000, medium: 3900,  hard: 5900,  deadly: 8800  },
+  18: { easy: 2100, medium: 4200,  hard: 6300,  deadly: 9500  },
+  19: { easy: 2400, medium: 4900,  hard: 7300,  deadly: 10900 },
+  20: { easy: 2800, medium: 5700,  hard: 8500,  deadly: 12700 }
+};
+
+function partyXPBudget(partySize, partyLevel, difficulty) {
+  const lvl = Math.max(1, Math.min(20, parseInt(partyLevel) || 1));
+  const t = XP_THRESHOLDS[lvl][difficulty] || XP_THRESHOLDS[lvl].medium;
+  return t * Math.max(1, parseInt(partySize) || 4);
+}
+
+app.post('/api/encounter/build', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
+  const { partySize, partyLevel, difficulty, theme, additionalContext, count } = req.body;
+  if (!partyLevel) return res.status(400).json({ error: 'partyLevel required' });
+  const size = Math.max(1, Math.min(10, parseInt(partySize) || 4));
+  const level = Math.max(1, Math.min(20, parseInt(partyLevel) || 1));
+  const diff = ['easy','medium','hard','deadly'].includes(difficulty) ? difficulty : 'medium';
+  const numEncounters = Math.max(1, Math.min(4, parseInt(count) || 3));
+  const xpBudget = partyXPBudget(size, level, diff);
+
+  const systemPrompt = `Du bist ein erfahrener D&D-5e-Encounter-Designer. Antworte AUSSCHLIESSLICH mit gültigem JSON, keinem Vorwort, keinem Markdown-Codeblock.
+
+Du baust ${numEncounters} balanced Encounters für eine Party von ${size} Charakteren auf Level ${level}, Difficulty: ${diff.toUpperCase()}.
+
+XP-Budget für diese Party (DMG-Threshold × Party-Size): ${xpBudget} XP.
+Encounter-Multiplier-Regeln (DMG):
+- 1 Monster: ×1
+- 2 Monster: ×1.5
+- 3-6 Monster: ×2
+- 7-10 Monster: ×2.5
+- 11-14 Monster: ×3
+- 15+ Monster: ×4
+Adjusted XP (sum × multiplier) sollte nahe am Budget liegen.
+
+THEMA / KONTEXT: ${theme ? `"${theme}"` : 'flexibel'}
+${additionalContext ? 'ZUSATZ: ' + additionalContext : ''}
+
+REGELN:
+- Nutze nur SRD 5.1 Monster (kein paid content)
+- Variiere zwischen den ${numEncounters} Encountern (z.B. 1 single boss, 1 mob, 1 mixed)
+- Tactics: kurze Hinweise wie das Monster im Kampf agieren würde (Range, Spells, Movement)
+- statblock-Felder kompakt: hp, ac, speed, str/dex/con/int/wis/cha als Zahlen, savingThrows + skills als String, multiAttack als Boolean
+- actions: Array mit { name, text } — text mit kompletter Mechanik (z.B. "Melee Weapon Attack: +5 to hit, reach 5 ft. Hit: 7 (1d8+3) slashing damage.")
+
+ANTWORT-FORMAT (exakt dieses JSON-Schema):
+{
+  "encounters": [
+    {
+      "title": "string — z.B. 'Bandit-Hinterhalt im Wald'",
+      "description": "1-2 Sätze atmosphärisch — was sehen die Spieler",
+      "totalXP": 1200,
+      "adjustedXP": 1800,
+      "difficulty": "medium",
+      "monsters": [
+        {
+          "name": "Bandit Captain",
+          "count": 1,
+          "cr": "2",
+          "xp": 450,
+          "statblock": {
+            "size": "Medium", "creatureType": "humanoid", "alignment": "any non-lawful alignment",
+            "ac": 15, "hp": 65, "hitDice": "10d8+20", "speed": "30 ft.",
+            "stats": { "str": 15, "dex": 16, "con": 14, "int": 14, "wis": 11, "cha": 14 },
+            "savingThrows": "Str +4, Dex +5, Wis +2",
+            "skills": "Athletics +4, Deception +4",
+            "senses": "passive Perception 10",
+            "languages": "any two languages"
+          },
+          "traits": [
+            { "name": "Trait Name", "text": "Detailed description with mechanics." }
+          ],
+          "actions": [
+            { "name": "Multiattack", "text": "The captain makes three attacks: two with its scimitar and one with its dagger." },
+            { "name": "Scimitar", "text": "Melee Weapon Attack: +5 to hit, reach 5 ft., one target. Hit: 6 (1d6+3) slashing." }
+          ],
+          "tactics": "Stays back, directs minions, throws daggers from cover."
+        }
+      ]
+    }
+  ]
+}`;
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 6000,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: `Generiere die ${numEncounters} Encounter im JSON-Format wie spezifiziert.` }]
+      })
+    });
+    const data = await response.json();
+    let text = '';
+    if (Array.isArray(data.content)) text = data.content.map(c => c.type === 'text' ? c.text : '').join('').trim();
+    // JSON-Markdown-Codeblock entfernen falls AI eine reinsetzt
+    text = text.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```\s*$/, '').trim();
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch (e) {
+      // Fallback: versuche zwischen { und letztem } zu extrahieren
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) try { parsed = JSON.parse(m[0]); } catch(_){}
+      if (!parsed) return res.status(502).json({ error: 'AI-Antwort konnte nicht geparst werden', raw: text.slice(0, 500) });
+    }
+    res.json({
+      ok: true,
+      encounters: parsed.encounters || [],
+      meta: { partySize: size, partyLevel: level, difficulty: diff, xpBudget }
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CHARAKTER-EINLADUNGEN — Magic-Links pro Charakter (ersetzt Party-Codes)
 // SQL: 006_character_invites.sql
 // ═══════════════════════════════════════════════════════════════════════════
