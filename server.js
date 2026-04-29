@@ -624,13 +624,38 @@ function partyXPBudget(partySize, partyLevel, difficulty) {
 
 app.post('/api/encounter/build', async (req, res) => {
   if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
-  const { partySize, partyLevel, difficulty, theme, additionalContext, count } = req.body;
+  const { partySize, partyLevel, difficulty, theme, additionalContext, count, campaignContext } = req.body;
   if (!partyLevel) return res.status(400).json({ error: 'partyLevel required' });
   const size = Math.max(1, Math.min(10, parseInt(partySize) || 4));
   const level = Math.max(1, Math.min(20, parseInt(partyLevel) || 1));
   const diff = ['easy','medium','hard','deadly'].includes(difficulty) ? difficulty : 'medium';
   const numEncounters = Math.max(1, Math.min(4, parseInt(count) || 3));
   const xpBudget = partyXPBudget(size, level, diff);
+
+  // Campaign-Context-Block für System-Prompt
+  let contextBlock = '';
+  if (campaignContext && typeof campaignContext === 'object') {
+    const parts = [];
+    if (campaignContext.campaignName) parts.push(`KAMPAGNE: "${campaignContext.campaignName}"`);
+    if (campaignContext.currentLocation) {
+      const loc = campaignContext.currentLocation;
+      parts.push(`AKTUELLE SZENE: ${loc.name}${loc.meta ? ' (' + loc.meta + ')' : ''}`);
+      if (loc.readAloud) parts.push(`READ-ALOUD: ${loc.readAloud}`);
+      if (loc.dmNote) parts.push(`DM-NOTIZ: ${loc.dmNote}`);
+    }
+    if (Array.isArray(campaignContext.existingNpcs) && campaignContext.existingNpcs.length) {
+      const npcLines = campaignContext.existingNpcs.map(n => `- ${n.name}${n.cr ? ' (CR ' + n.cr + ')' : ''}${n.type ? ' · ' + n.type : ''}${n.role ? ' · ' + n.role : ''}`).join('\n');
+      parts.push(`VORHANDENE NPCs (kannst sie als Bösewichte/Verbündete einsetzen — verwende ihre Namen):\n${npcLines}`);
+    }
+    if (campaignContext.lastRecap) {
+      parts.push(`LETZTER RECAP (Session ${campaignContext.lastRecap.sessionNumber} · "${campaignContext.lastRecap.title}"): ${campaignContext.lastRecap.recap}`);
+    }
+    if (Array.isArray(campaignContext.partyState) && campaignContext.partyState.length) {
+      const partyLines = campaignContext.partyState.map(p => `- ${p.name} (${p.class} Lv${p.level}) HP ${p.hp}/${p.maxHp}${p.conditions?.length ? ' · ' + p.conditions.join(', ') : ''}`).join('\n');
+      parts.push(`PARTY-STATE:\n${partyLines}`);
+    }
+    if (parts.length) contextBlock = '\n\n═══ KAMPAGNEN-KONTEXT ═══\n' + parts.join('\n\n') + '\n═══════════════════════';
+  }
 
   const systemPrompt = `Du bist ein erfahrener D&D-5e-Encounter-Designer. Antworte AUSSCHLIESSLICH mit gültigem JSON, keinem Vorwort, keinem Markdown-Codeblock.
 
@@ -647,12 +672,14 @@ Encounter-Multiplier-Regeln (DMG):
 Adjusted XP (sum × multiplier) sollte nahe am Budget liegen.
 
 THEMA / KONTEXT: ${theme ? `"${theme}"` : 'flexibel'}
-${additionalContext ? 'ZUSATZ: ' + additionalContext : ''}
+${additionalContext ? 'ZUSATZ: ' + additionalContext : ''}${contextBlock}
 
 REGELN:
-- Nutze nur SRD 5.1 Monster (kein paid content)
-- Variiere zwischen den ${numEncounters} Encountern (z.B. 1 single boss, 1 mob, 1 mixed)
-- Tactics: kurze Hinweise wie das Monster im Kampf agieren würde (Range, Spells, Movement)
+- Nutze SRD 5.1 Monster ALS BASIS — wenn der Kampagnen-Context vorhandene NPCs erwähnt, kannst du sie auch direkt einsetzen (Statblock vom passenden SRD-Monster ableiten)
+- Encounter-Titel + description müssen zur AKTUELLEN SZENE passen (falls Context gegeben). Generic-Titel wie "Bandit-Hinterhalt" sind NICHT gewünscht wenn die Szene "W14 Wine Cellar mit Rahadin" ist.
+- Description ist atmosphärisch und stellt narrative Anbindung an Recap/Szene her wenn möglich
+- Variiere zwischen den ${numEncounters} Encountern (z.B. 1 single boss, 1 mob, 1 mixed) UND zwischen Approach-Stilen (Combat-heavy / Stealth-möglich / Social-twist)
+- Tactics: kurze Hinweise wie das Monster im Kampf agieren würde (Range, Spells, Movement, Reaktion auf bestimmte PC-Klassen)
 - statblock-Felder kompakt: hp, ac, speed, str/dex/con/int/wis/cha als Zahlen, savingThrows + skills als String, multiAttack als Boolean
 - actions: Array mit { name, text } — text mit kompletter Mechanik (z.B. "Melee Weapon Attack: +5 to hit, reach 5 ft. Hit: 7 (1d8+3) slashing damage.")
 
@@ -1773,6 +1800,77 @@ app.get('/api/subscriber-count', async (req, res) => {
   } catch (err) {
     console.error('subscriber-count error:', err);
     res.json({ count: 0 });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LORE CODEX — AI-generated campaign wiki from characters, sessions, locations
+// POST /api/lore-codex
+// Body: { campaign, characters[], npcs[], locations[], sessions[] }
+// Returns: { entries: [{ type, name, summary, connections[], tags[], secrets }] }
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/lore-codex', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
+
+  const { campaign = {}, characters = [], npcs = [], locations = [], sessions = [] } = req.body;
+
+  const context = [
+    `# Campaign: ${campaign.name || 'Unnamed'}`,
+    campaign.description ? `Description: ${campaign.description}` : '',
+    characters.length ? `## Player Characters\n${characters.map(c =>
+      `- ${c.name} (${[c.race, c.class, c.level ? 'Lv' + c.level : ''].filter(Boolean).join(' ')}): ${c.backstory || '—'}`
+    ).join('\n')}` : '',
+    npcs.length ? `## NPCs\n${npcs.map(n => `- ${n.name}: ${n.description || '—'}`).join('\n')}` : '',
+    locations.length ? `## Locations\n${locations.map(l => `- ${l.name}: ${l.description || '—'}`).join('\n')}` : '',
+    sessions.length ? `## Sessions\n${sessions.map((s, i) =>
+      `### Session ${i + 1}: ${s.title || 'Unnamed'}\n${s.recap || '—'}`
+    ).join('\n\n')}` : ''
+  ].filter(Boolean).join('\n\n');
+
+  const system = `You are a TTRPG lore scholar. Given campaign data, generate a structured wiki with 4–10 entries covering the most important people, places, factions, events, and mysteries.
+
+Return ONLY valid JSON in this exact shape:
+{
+  "entries": [
+    {
+      "type": "character" | "npc" | "location" | "faction" | "event" | "item" | "mystery",
+      "name": "string",
+      "summary": "2–3 sentence in-world description",
+      "connections": ["name of related entry", ...],
+      "tags": ["3–5 short keywords"],
+      "secrets": "optional DM-only note, omit if none"
+    }
+  ]
+}
+
+Focus on what makes this campaign unique. Cross-link entries via connections. secrets should only appear when genuinely interesting.`;
+
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2500,
+        system,
+        messages: [{ role: 'user', content: context }]
+      })
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: data?.error?.message || 'Claude error' });
+
+    const text = data?.content?.[0]?.text || '';
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return res.status(500).json({ error: 'No JSON in Claude response' });
+
+    const wiki = JSON.parse(match[0]);
+    res.json(wiki);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
