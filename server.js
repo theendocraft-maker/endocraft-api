@@ -1855,7 +1855,7 @@ Focus on what makes this campaign unique. Cross-link entries via connections. se
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 2500,
+        max_tokens: 6000,
         system,
         messages: [{ role: 'user', content: context || '# Campaign: Unnamed' }]
       })
