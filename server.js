@@ -1857,19 +1857,41 @@ Focus on what makes this campaign unique. Cross-link entries via connections. se
         model: 'claude-sonnet-4-6',
         max_tokens: 2500,
         system,
-        messages: [{ role: 'user', content: context }]
+        messages: [{ role: 'user', content: context || '# Campaign: Unnamed' }]
       })
     });
-    const data = await r.json();
-    if (!r.ok) return res.status(r.status).json({ error: data?.error?.message || 'Claude error' });
+
+    let data;
+    try { data = await r.json(); }
+    catch (parseErr) {
+      console.error('[lore-codex] Claude response not JSON:', parseErr.message);
+      return res.status(502).json({ error: 'Unexpected response from Claude API' });
+    }
+
+    if (!r.ok) {
+      const msg = data?.error?.message || JSON.stringify(data);
+      console.error('[lore-codex] Claude API error', r.status, msg);
+      return res.status(502).json({ error: `Claude API: ${msg}` });
+    }
 
     const text = data?.content?.[0]?.text || '';
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return res.status(500).json({ error: 'No JSON in Claude response' });
+    if (!match) {
+      console.error('[lore-codex] No JSON block in Claude response. Raw text:', text.slice(0, 400));
+      return res.status(500).json({ error: 'Claude returned no JSON. Versuche es erneut.' });
+    }
 
-    const wiki = JSON.parse(match[0]);
+    let wiki;
+    try { wiki = JSON.parse(match[0]); }
+    catch (jsonErr) {
+      console.error('[lore-codex] JSON.parse failed:', jsonErr.message, '\nRaw:', match[0].slice(0, 400));
+      return res.status(500).json({ error: 'JSON parse error in Claude response' });
+    }
+
+    if (!Array.isArray(wiki.entries)) wiki.entries = [];
     res.json(wiki);
   } catch (err) {
+    console.error('[lore-codex] Unexpected error:', err);
     res.status(500).json({ error: err.message });
   }
 });
