@@ -877,6 +877,51 @@ app.get('/api/invites/by-campaign', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /api/campaigns/:dmEmail/:campaignId/album — Alle Karten aller Member dieser Kampagne
+// Aggregiert via campaign_members → Email → owner_slug → cards/sessions
+app.get('/api/campaigns/:dmEmail/:campaignId/album', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const dmEmail = String(req.params.dmEmail || '').toLowerCase().trim();
+  const campaignId = String(req.params.campaignId || '').trim();
+  if (!dmEmail || !campaignId) return res.status(400).json({ error: 'dmEmail + campaignId required' });
+  try {
+    // Members holen (inkl. DM)
+    const memResp = await fetch(`${SUPABASE_URL}/rest/v1/campaign_members?dm_email=eq.${encodeURIComponent(dmEmail)}&campaign_id=eq.${encodeURIComponent(campaignId)}&select=member_email,member_role,character_name,character_id`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const members = await memResp.json();
+    const memberList = Array.isArray(members) ? members : [];
+    // DM auch immer dabei (falls nicht in members)
+    if (!memberList.find(m => m.member_email === dmEmail)) {
+      memberList.unshift({ member_email: dmEmail, member_role: 'dm', character_name: 'DM', character_id: null });
+    }
+    if (!memberList.length) return res.json({ members: [], cards: [], sessions: [] });
+
+    // Slug pro Member
+    const slugByEmail = Object.fromEntries(memberList.map(m => [m.member_email, emailToSlug(m.member_email)]));
+    const slugs = Object.values(slugByEmail);
+    const dnBySlug = {};
+    memberList.forEach(m => { dnBySlug[slugByEmail[m.member_email]] = m.character_name || (m.member_role === 'dm' ? 'DM' : m.member_email.split('@')[0]); });
+
+    // Karten holen (cards + sessions Tabellen, Union)
+    const fetchSlugTable = async (table, fields) => {
+      try {
+        const url = `${SUPABASE_URL}/rest/v1/${table}?owner_slug=in.(${slugs.map(s => '"' + s + '"').join(',')})&select=${fields}&order=created_at.desc&limit=200`;
+        const r = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+        if (!r.ok) return [];
+        const d = await r.json();
+        return Array.isArray(d) ? d : [];
+      } catch (e) { return []; }
+    };
+    const cards = await fetchSlugTable('cards', 'id,number,session_title,legendary_moment,character_name,character_class,rarity,image_url,owner_slug,created_at');
+    const sessions = await fetchSlugTable('sessions', '*');
+
+    // Member-Name annotieren
+    cards.forEach(c => { c._memberName = dnBySlug[c.owner_slug] || ''; });
+    sessions.forEach(s => { s._memberName = dnBySlug[s.owner_slug] || ''; });
+
+    res.json({ members: memberList, cards, sessions });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /api/campaigns/by-member?email= — alle Kampagnen denen User beigetreten ist
 app.get('/api/campaigns/by-member', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
@@ -1133,6 +1178,55 @@ app.post('/api/image/fast', async (req, res) => {
     if (result.status === 'succeeded') return res.json({ url: result.output[0] });
     res.status(500).json({ error: 'Image generation failed' });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// IMAGE PROXY — for the Bundle Studio tool. Generated images live on third-party
+// CDNs (AIML / Replicate) that don't send permissive CORS headers, so the browser
+// can't fetch them as blobs to build a ZIP. This streams them back same-origin.
+// SAFETY: only https, host must end with an allow-listed CDN suffix (blocks SSRF
+// to internal/private hosts), and the upstream content-type must be an image.
+// ═══════════════════════════════════════════════════════════════════════════
+const IMAGE_PROXY_ALLOWED_HOSTS = [
+  'aimlapi.com', 'cdn.aimlapi.com', 'api.aimlapi.com',
+  'replicate.delivery', 'replicate.com',
+  'fal.media', 'fal.ai',
+  'storage.googleapis.com', 'amazonaws.com',
+  'blob.core.windows.net', 'bytedance.com', 'volccdn.com', 'volces.com'
+];
+app.get('/api/image/proxy', async (req, res) => {
+  try {
+    const raw = req.query.url;
+    if (!raw || typeof raw !== 'string') return res.status(400).json({ error: 'url required' });
+    let u;
+    try { u = new URL(raw); } catch { return res.status(400).json({ error: 'invalid url' }); }
+    if (u.protocol !== 'https:') return res.status(400).json({ error: 'https only' });
+    const host = u.hostname.toLowerCase();
+    // Block obvious internal / private targets (SSRF guard)
+    if (/^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.|::1|metadata\.)/.test(host) || host.endsWith('.internal')) {
+      return res.status(403).json({ error: 'host not allowed' });
+    }
+    const ok = IMAGE_PROXY_ALLOWED_HOSTS.some(suf => host === suf || host.endsWith('.' + suf) || host.endsWith(suf));
+    if (!ok) {
+      console.warn('[image proxy] blocked host:', host);
+      return res.status(403).json({ error: 'host not allow-listed', host });
+    }
+    const upstream = await fetch(u.toString(), { redirect: 'follow' });
+    if (!upstream.ok) return res.status(502).json({ error: 'upstream ' + upstream.status });
+    const ctype = upstream.headers.get('content-type') || '';
+    if (!ctype.startsWith('image/')) {
+      return res.status(415).json({ error: 'not an image', ctype });
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Content-Type', ctype);
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.set('Content-Disposition', 'attachment');
+    return res.send(buf);
+  } catch (err) {
+    console.error('[image proxy] error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
