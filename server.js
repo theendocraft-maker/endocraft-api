@@ -1990,4 +1990,92 @@ Focus on what makes this campaign unique. Cross-link entries via connections. se
   }
 });
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BUNDLE LISTING GENERATOR
+// Erzeugt fertige Marketplace-Listings (Etsy + DMs Guild + Gumroad + itch.io)
+// aus Bundle-Theme + Asset-Manifest. Spart pro Bundle ~60 Min Schreibarbeit.
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/listing-generator', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
+  const { bundleName, tagline, tier, assetCount, assetTitles, marketplace } = req.body;
+  if (!bundleName) return res.status(400).json({ error: 'bundleName required' });
+
+  const tierGuidance = {
+    flagship: 'Premium-Pack (20-30€) — Positionierung: das ultimative, all-in-one DM Kit für dieses Setting. Description hebt Vollständigkeit hervor, suggeriert "saves you 20+ hours of prep".',
+    evergreen: 'Solides Themed-Pack (10-18€) — bewährte Themen mit klarer Zielgruppe. Description fokussiert auf Use-Cases ("perfekt für Lost Mine of Phandelver session 3").',
+    trope: 'Mini-Pack (6-12€) — generische aber dauerverkaufende Kategorien. Description spricht eine breite Zielgruppe an, betont Wiederverwendbarkeit.'
+  }[tier] || 'Mittlere Preisklasse, Standard-Positionierung.';
+
+  const targetMarketplace = ['etsy','dmsguild','gumroad','itch'].includes(marketplace) ? marketplace : 'all';
+
+  const systemPrompt = `Du bist ein erfahrener D&D-Marketplace-SEO-Texter. Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock.
+
+Du schreibst hochkonvertierende Listing-Texte für ein digitales D&D-Bundle:
+
+BUNDLE-NAME: "${bundleName}"
+${tagline ? 'TAGLINE: ' + tagline : ''}
+TIER: ${tier || 'evergreen'} (${tierGuidance})
+ASSETS: ${assetCount || 'unbekannt'} Items
+${Array.isArray(assetTitles) && assetTitles.length ? 'ASSET-LISTE:\n' + assetTitles.slice(0,30).map(t => '- ' + t).join('\n') : ''}
+
+REGELN:
+- Titles: 3 Varianten, max 140 Zeichen, FRONT-LOADED mit den wichtigsten Keywords (Etsy-Algo bevorzugt erste Worte)
+- Etsy-Tags: GENAU 13 Tags, je max 20 Zeichen, LONG-TAIL-fokussiert (nicht "d&d", lieber "dnd npc tokens", "dungeon master gift"). Mix aus: 5 Produkt-Keywords + 4 Setting-Keywords + 4 Use-Case-Keywords.
+- Etsy-Description: 250-400 Wörter, in EN. Format: kurzer Hook (1 Satz) + Bullet-Point-Liste "What you get" + Use-Cases-Absatz + Compatibility-Hinweise (Roll20, Foundry, Owlbear, Tabletop) + Print-Instructions kurz + Closing-CTA.
+- DMs Guild description: anders schreiben — direkter, kämpfer-orientiert, "supplement" statt "pack", 200-300 Wörter, betont GM-Workflow-Vorteil
+- Gumroad description: lockerer Ton, betont künstlerische Qualität + Lizenz für Streamer
+- itch.io description: indie-friendly, betont Community + Lizenz für Hobby-Projekte
+- Pinterest Pin Texts: 5 Varianten je max 70 Zeichen, klickstarke Hooks ("Stop scrambling for NPCs before session.")
+- Pricing: konkrete Empfehlung mit Begründung
+- Cover-Image-Vorschlag: welcher Asset-Typ aus der Liste eignet sich am besten als Hero
+
+ANTWORT-FORMAT (exakt dieses JSON-Schema, kein Markdown):
+{
+  "titles": ["Title 1", "Title 2", "Title 3"],
+  "etsy_tags": ["tag1","tag2","tag3","tag4","tag5","tag6","tag7","tag8","tag9","tag10","tag11","tag12","tag13"],
+  "etsy_description": "Multi-line description with \\n\\n for paragraphs and • for bullets",
+  "dmsguild_description": "...",
+  "gumroad_description": "...",
+  "itch_description": "...",
+  "pinterest_pins": ["Hook 1", "Hook 2", "Hook 3", "Hook 4", "Hook 5"],
+  "pricing": { "etsy": 12.99, "dmsguild": 9.95, "gumroad": 12, "itch": 10, "reasoning": "..." },
+  "cover_suggestion": "Welcher Asset-Typ als Hero (1 Satz)",
+  "seo_short": "65-Zeichen Meta-Description"
+}`;
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4000,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: `Generiere die Listing-Texte als JSON für das Bundle "${bundleName}". Target-Marketplace: ${targetMarketplace}.` }]
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('[listing-gen] Claude API error', response.status, data?.error?.message);
+      return res.status(502).json({ error: data?.error?.message || 'Claude API error' });
+    }
+    let text = '';
+    if (Array.isArray(data.content)) text = data.content.map(c => c.type === 'text' ? c.text : '').join('').trim();
+    text = text.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```\s*$/, '').trim();
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch (e) {
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) try { parsed = JSON.parse(m[0]); } catch(_){}
+      if (!parsed) return res.status(502).json({ error: 'AI-Antwort konnte nicht geparst werden', raw: text.slice(0, 500) });
+    }
+    res.json({ ok: true, listing: parsed, meta: { bundleName, tier, marketplace: targetMarketplace } });
+  } catch (e) {
+    console.error('[listing-gen]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 app.listen(PORT, () => console.log(`EndoCraft API running on port ${PORT}`));
