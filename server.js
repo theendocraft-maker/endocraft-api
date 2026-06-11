@@ -2078,4 +2078,67 @@ ANTWORT-FORMAT (exakt dieses JSON-Schema, kein Markdown):
 });
 
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PINTEREST PIN TEXTS — Claude generiert virale Hooks + Subtitles für Pin-Overlays
+// Frontend nutzt /api/image für Hintergrundbilder + canvas-composing für Overlays
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/pinterest-pin-texts', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
+  const { bundleName, tagline, tier, count } = req.body;
+  if (!bundleName) return res.status(400).json({ error: 'bundleName required' });
+  const numPins = Math.max(3, Math.min(10, parseInt(count) || 5));
+
+  const systemPrompt = `Du bist Pinterest-Marketing-Profi für D&D-/TTRPG-Content. Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown.
+
+Du schreibst ${numPins} virale Pinterest-Pin-Texte für ein D&D-Bundle:
+
+BUNDLE: "${bundleName}"
+${tagline ? 'KONTEXT: ' + tagline : ''}
+TIER: ${tier || 'evergreen'}
+
+REGELN für Pin-Hooks (was Pinterest-User klickbar macht):
+- Hooks sind KURZ + SPEZIFISCH + EMOTIONAL — "Stop scrambling for NPCs before session" > "Get NPC pack"
+- Mix aus 5 Hook-Stilen: Pain-Point ("Tired of bland NPCs?"), Listicle ("17 NPCs every DM needs"), Curiosity-Gap ("The DM trick that saved my campaign"), Authority ("Used by 500+ DMs"), Result-Promise ("Run your next session in 30 minutes")
+- Subtitle: 1 ergänzender Satz, was im Pack ist + an wen es geht
+- KEINE Generika wie "Awesome NPC Pack". Pinterest-User scrollen drüber weg.
+- Pin-Style-Vorschlag pro Pin: welche Visual-Atmosphäre (dark gothic / bright fantasy / minimal text-focus / character-portrait / map-focused / collage)
+- CTA: kurze Action-Phrase fürs Pin-Bottom (max 4 Wörter)
+
+ANTWORT-FORMAT (exaktes JSON):
+{
+  "pins": [
+    { "hook": "Hauptzeile, max 65 Zeichen, klickstarker Hook", "subtitle": "Subtitle 1 Satz, max 90 Zeichen", "cta": "Get the pack", "visual_style": "dark gothic candle-lit", "hook_style": "pain-point" },
+    ...
+  ]
+}`;
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2000,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: `Generiere ${numPins} Pinterest-Pin-Texte als JSON für "${bundleName}".` }]
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(502).json({ error: data?.error?.message || 'Claude API error' });
+    let text = '';
+    if (Array.isArray(data.content)) text = data.content.map(c => c.type === 'text' ? c.text : '').join('').trim();
+    text = text.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```\s*$/, '').trim();
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch (e) {
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) try { parsed = JSON.parse(m[0]); } catch(_){}
+      if (!parsed) return res.status(502).json({ error: 'AI-Antwort konnte nicht geparst werden', raw: text.slice(0, 500) });
+    }
+    res.json({ ok: true, pins: parsed.pins || [], meta: { bundleName, count: numPins } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
 app.listen(PORT, () => console.log(`EndoCraft API running on port ${PORT}`));
