@@ -2150,4 +2150,76 @@ ANTWORT-FORMAT (exaktes JSON):
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QUALITY CHECK — Claude Vision bewertet ein Asset (Score 1-10 + Issues)
+// Input: { imageUrl, assetType, bundleName }
+// Output: { score, issues[], reroll_recommended, reasoning }
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/quality-check', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
+  const { imageUrl, assetType, bundleName } = req.body;
+  if (!imageUrl) return res.status(400).json({ error: 'imageUrl required' });
+
+  const typeContext = {
+    cover: 'a marketing hero/cover image for a D&D bundle on Etsy. Must look polished, marketable, atmospheric. Composition matters.',
+    npc: 'a D&D NPC portrait. Anatomy correct (esp. hands, eyes), character distinct, expression clear, no melting features.',
+    location: 'a D&D establishing location shot. Atmospheric, depth, no architectural impossibilities.',
+    map: 'a top-down tabletop battle map. Bird-eye view, clear features, grid-friendly composition.',
+    item: 'an illustrated magic item card. Detailed, ornate, parchment-style if relevant.'
+  }[assetType] || 'a D&D bundle asset.';
+
+  const systemPrompt = `Du bist ein strenger Quality-Reviewer für AI-generierte D&D-Marketplace-Assets. Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown.
+
+Du bewertest ${typeContext}
+
+REGELN:
+- Score 1-10 (10 = perfekt verkaufsfertig, 7-9 = gut/marketable, 4-6 = mittelmäßig (Reroll empfohlen), 1-3 = unbrauchbar)
+- Issues: array of short flags wie "hand_deformity", "off_theme", "low_contrast", "broken_composition", "blurry", "generic", "duplicate_features", "off_anatomy", "watermark_visible", "text_artifact"
+- reroll_recommended: true wenn score < 7
+- reasoning: 1-2 Sätze in Deutsch, kurz und konkret. Nur Hauptproblem nennen wenn welches da ist.
+- Bundle-Context: "${bundleName||'unbekannt'}" — falls Asset thematisch nicht passt, das ist ein Issue.
+
+ANTWORT-FORMAT:
+{
+  "score": 7,
+  "issues": ["off_theme"],
+  "reroll_recommended": false,
+  "reasoning": "Solide Atmosphäre aber nicht ganz on-theme."
+}`;
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 400,
+        system: systemPrompt,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'url', url: imageUrl } },
+            { type: 'text', text: `Bewerte dieses ${assetType||'asset'} für das Bundle "${bundleName||''}". JSON only.` }
+          ]
+        }]
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(502).json({ error: data?.error?.message || 'Claude API error' });
+    let text = '';
+    if (Array.isArray(data.content)) text = data.content.map(c => c.type === 'text' ? c.text : '').join('').trim();
+    text = text.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```\s*$/, '').trim();
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch (e) {
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) try { parsed = JSON.parse(m[0]); } catch(_){}
+      if (!parsed) return res.status(502).json({ error: 'AI parse failed', raw: text.slice(0,300) });
+    }
+    res.json({ ok: true, ...parsed });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
 app.listen(PORT, () => console.log(`EndoCraft API running on port ${PORT}`));
