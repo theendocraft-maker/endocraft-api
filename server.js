@@ -2234,9 +2234,11 @@ app.post('/api/asset-concepts', async (req, res) => {
 
   const slotsDesc = slots.map(s => `- ${s.count}× ${s.type} (each needs unique concept)`).join('\n');
 
-  const systemPrompt = `Du bist ein Senior Concept-Designer für D&D-Asset-Packs. Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown.
+  const systemPrompt = `Du bist ein Senior Concept-Designer für D&D-Marketplace-Asset-Packs. Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown.
 
-Du designst unique, abwechslungsreiche Asset-Concepts für ein Marketplace-Bundle. Jedes Asset MUSS sich klar von den anderen unterscheiden — Käufer kaufen Variety.
+Du designst Asset-Concepts die KÄUFER FINDEN UND KAUFEN. Käufer suchen entweder:
+(a) bekannte Adventure-NPCs (Strahd, Sildar Hallwinter, Glasstaff) wenn das Bundle ein WotC/Pyram-King-Modul ist
+(b) wiedererkennbare D&D-Archetypen (der bärtige Wirt, der edle Paladin, die kecke Halbling-Schurkin) wenn das Bundle generic ist
 
 BUNDLE: "${bundleName}"
 ${tagline ? 'TAGLINE: ' + tagline : ''}
@@ -2245,13 +2247,31 @@ TIER: ${tier || 'evergreen'}
 SLOTS NEEDED:
 ${slotsDesc}
 
-REGELN für Variation:
-- NPCs: variiere Race (Human, Elf, Dwarf, Half-Orc, Tiefling, Dragonborn, Halfling, Gnome, Goliath, Aasimar, Genasi, …), Class/Role (Warrior, Mage, Rogue, Priest, Bard, Ranger, Druid, Healer, Merchant, Noble, Commoner, Outlaw, Bandit, …), Gender, Age (young/middle-aged/elderly), distinct visual details (scars, jewelry, clothing style, weapon type, hair color/style), facial expression/mood (stoic, fierce, kind, suspicious, weary, exalted, …). NIE zwei NPCs mit gleicher Race+Class+Gender-Kombi.
-- Locations: variiere Time-of-Day (dawn/midday/dusk/midnight), Weather (clear/foggy/rainy/snowing/stormy), Sub-Location-Type (interior/exterior/landscape/cave/forest/courtyard), Mood (peaceful/dramatic/mysterious/dangerous).
-- Maps (Battle Maps): variiere Terrain-Typ (forest clearing / cave / dungeon room / village square / mountain pass / ruins / wilderness path / interior tavern), Scale, Encounter-Setup.
-- Items: variiere Item-Type (weapon, armor, jewelry, potion, scroll, tome, artifact, mundane object), material, magical-vibe-level.
-- Cover: ein Stück — Hero-Composition, das den Bundle-Vibe einfängt.
-- Concepts MUST stay on-theme zum Bundle. Storm King's Thunder = Giants & Mountains world. Phandelver = beginner-friendly classic Sword Coast. Tavern Pack = inn interior + travelers.
+═══ KRITISCHE REGELN ═══
+
+1. CANONICAL FIRST (für Adventure-Module): Wenn Bundle-Name ein WotC-Adventure ist (Curse of Strahd / Lost Mine of Phandelver / Storm King\'s Thunder / Tomb of Annihilation / etc.) oder ein Pyram-King-Modul, generiere PRIORITÄR die KANONISCHEN NPCs des Moduls. Beispiele:
+   - Curse of Strahd → Strahd von Zarovich (vampire lord pale skin, dark cape), Ireena Kolyana (red-haired noblewoman), Ismark the Lesser, Madam Eva (Vistani fortune teller), Rictavio, Rudolph van Richten, Ezmerelda d\'Avenir
+   - Lost Mine of Phandelver → Sildar Hallwinter (older male human knight), Glasstaff/Iarno Albrek (male human wizard purple robes), Klauth (red dragon), King Grol (bugbear chief), Sister Garaele, Halia Thornton
+   - Storm King\'s Thunder → King Hekaton (storm giant), Iymrith (blue dragon), Harshnag, Cog (kobold)
+   - Tomb of Annihilation → Acererak, Ras Nsi, Xandala
+   Nutze 60-80% der NPC-Slots für canonical, 20-40% für unique unbenannte Side-Characters die im Adventure auftauchen könnten.
+
+2. ARCHETYPES FIRST (für generic/trope Bundles): Wenn KEIN Adventure-Name, dann CLASSIC RECOGNIZABLE Archetypes:
+   - Tavern Pack: bearded innkeeper polishing mug, buxom barmaid carrying ale, cloaked mysterious stranger in corner, lute-playing bard, grizzled veteran at fire, dwarven blacksmith eating stew, halfling gambler with cards, hooded ranger with bow
+   - Forest Encounter: druid wildshape, hunter ranger with longbow, bandit with crossbow, dryad guardian, awakened tree spirit, kobold scout, witch in shack
+   - Gothic Horror: vampire lord brooding, banshee in white, mad scientist, headless horseman, possessed nun, witch with familiar
+   Klassische Bilder die jeder sofort als "DAS ist ein X" erkennt.
+
+3. KEINE "Diversity overload" — KEINE Tiefling-purple-Haare-Bardin oder Aasimar-Healer wenn nicht spezifisch gewollt. Verwende KLASSISCHE FANTASY-ARCHETYPEN. Tieflings/Dragonborn/Aasimar nur 1× pro 10 NPCs maximal, und nur bei Bundles die das Thema explizit haben (Avernus etc.).
+
+4. ICONIC VISUALS — jeder Concept muss in 1 Satz so beschrieben sein dass ein Marktplatz-Käufer SOFORT denkt "Ah, das ist der edle Paladin / das ist Strahd / das ist Sildar". Specific details die character-defining sind.
+
+═══ KATEGORIE-REGELN ═══
+
+- Locations: variiere Time-of-Day, Weather, Sub-Type. Bei Adventure-Bundles: kanonische Locations (Castle Ravenloft / Phandalin Village / Tridrone Outpost)
+- Maps: kanonische Locations vom Adventure ODER klassische D&D-Setups (cave entrance, dungeon room, forest clearing)
+- Items: klassische magic items vom Adventure (Sun Sword / Spellbook of Glasstaff / Tome of the Stilled Tongue) ODER classic D&D items (vorpal sword, cloak of elvenkind)
+- Cover: Hero-Composition mit ICONIC theme element (Castle Ravenloft silhouette / Cragmaw Cave entrance / classic tavern facade)
 
 ANTWORT-FORMAT (exakt dieses JSON):
 {
