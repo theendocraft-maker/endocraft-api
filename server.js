@@ -2222,4 +2222,87 @@ ANTWORT-FORMAT:
 });
 
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ASSET CONCEPTS — Claude generiert pro Bundle unique Variation pro Asset-Slot
+// Verhindert dass alle NPCs/Locations gleich aussehen
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/asset-concepts', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
+  const { bundleName, tagline, tier, slots } = req.body;
+  if (!bundleName || !Array.isArray(slots)) return res.status(400).json({ error: 'bundleName + slots[] required' });
+
+  const slotsDesc = slots.map(s => `- ${s.count}× ${s.type} (each needs unique concept)`).join('\n');
+
+  const systemPrompt = `Du bist ein Senior Concept-Designer für D&D-Asset-Packs. Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown.
+
+Du designst unique, abwechslungsreiche Asset-Concepts für ein Marketplace-Bundle. Jedes Asset MUSS sich klar von den anderen unterscheiden — Käufer kaufen Variety.
+
+BUNDLE: "${bundleName}"
+${tagline ? 'TAGLINE: ' + tagline : ''}
+TIER: ${tier || 'evergreen'}
+
+SLOTS NEEDED:
+${slotsDesc}
+
+REGELN für Variation:
+- NPCs: variiere Race (Human, Elf, Dwarf, Half-Orc, Tiefling, Dragonborn, Halfling, Gnome, Goliath, Aasimar, Genasi, …), Class/Role (Warrior, Mage, Rogue, Priest, Bard, Ranger, Druid, Healer, Merchant, Noble, Commoner, Outlaw, Bandit, …), Gender, Age (young/middle-aged/elderly), distinct visual details (scars, jewelry, clothing style, weapon type, hair color/style), facial expression/mood (stoic, fierce, kind, suspicious, weary, exalted, …). NIE zwei NPCs mit gleicher Race+Class+Gender-Kombi.
+- Locations: variiere Time-of-Day (dawn/midday/dusk/midnight), Weather (clear/foggy/rainy/snowing/stormy), Sub-Location-Type (interior/exterior/landscape/cave/forest/courtyard), Mood (peaceful/dramatic/mysterious/dangerous).
+- Maps (Battle Maps): variiere Terrain-Typ (forest clearing / cave / dungeon room / village square / mountain pass / ruins / wilderness path / interior tavern), Scale, Encounter-Setup.
+- Items: variiere Item-Type (weapon, armor, jewelry, potion, scroll, tome, artifact, mundane object), material, magical-vibe-level.
+- Cover: ein Stück — Hero-Composition, das den Bundle-Vibe einfängt.
+- Concepts MUST stay on-theme zum Bundle. Storm King's Thunder = Giants & Mountains world. Phandelver = beginner-friendly classic Sword Coast. Tavern Pack = inn interior + travelers.
+
+ANTWORT-FORMAT (exakt dieses JSON):
+{
+  "concepts": {
+    "cover": [{"modifier": "epic landscape with [bundle theme] focal point, golden hour, panoramic composition"}],
+    "npc": [
+      {"modifier": "elderly female human cleric with silver hair in bun, simple robes, kind weathered face holding wooden holy symbol"},
+      {"modifier": "middle-aged male half-orc bandit with mohawk, scarred face, leather armor, mean expression with broken nose"},
+      ...12 if 12 needed, ALL distinct
+    ],
+    "location": [
+      {"modifier": "stone tavern interior at evening, fireplace warm light, wooden tables, atmospheric"},
+      {"modifier": "muddy village square in heavy rain, dusk lighting, market stalls covered"},
+      ...
+    ],
+    "map": [
+      {"modifier": "stone watchtower ruin top-down, partial walls, fire pit center, scattered debris, gridded"},
+      ...
+    ],
+    "item": [...]
+  }
+}
+
+Generiere die EXAKTE Anzahl pro Slot wie angefordert. Jeder Concept-Modifier ist 1-2 spezifische Sätze die in einen Image-Prompt eingefügt werden.`;
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 6000,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: `Generiere unique Concepts für alle Slots des Bundles "${bundleName}". JSON only.` }]
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(502).json({ error: data?.error?.message || 'Claude API error' });
+    let text = '';
+    if (Array.isArray(data.content)) text = data.content.map(c => c.type === 'text' ? c.text : '').join('').trim();
+    text = text.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```\s*$/, '').trim();
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch (e) {
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) try { parsed = JSON.parse(m[0]); } catch(_){}
+      if (!parsed) return res.status(502).json({ error: 'AI parse failed', raw: text.slice(0,400) });
+    }
+    res.json({ ok: true, concepts: parsed.concepts || {} });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
 app.listen(PORT, () => console.log(`EndoCraft API running on port ${PORT}`));
