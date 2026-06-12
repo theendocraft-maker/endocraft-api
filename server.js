@@ -19,7 +19,7 @@ function emailToSlug(email){
     .slice(0, 16);
 }
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '45mb' })); // 45mb: Etsy-Digital-Files (max 20MB binär ≈ 27MB base64) laufen als JSON durch
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const REPLICATE_KEY = process.env.REPLICATE_API_KEY;
 const AIML_KEY = process.env.AIML_API_KEY;
@@ -2321,6 +2321,303 @@ Generiere die EXAKTE Anzahl pro Slot wie angefordert. Jeder Concept-Modifier ist
       if (!parsed) return res.status(502).json({ error: 'AI parse failed', raw: text.slice(0,400) });
     }
     res.json({ ok: true, concepts: parsed.concepts || {} });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COVER-HOOK — Claude (Haiku) generiert 3 scharfe 4-6-Wort Story-Hooks pro Bundle
+// Genutzt von thumbnail.html (Etsy-Cover-Subtitle) UND pinterest.html (Pin-Hook)
+// → identische Hooks auf beiden Kanälen = Brand-Konsistenz
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/cover-hook', async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(500).json({ error: 'API key not configured' });
+  const { bundleName, bundleTag, count } = req.body;
+  if (!bundleName) return res.status(400).json({ error: 'bundleName required' });
+  const prompt = `Generate 3 short emotional story hooks (4-6 words each) for an Etsy D&D asset pack listing called "${bundleName}".${bundleTag ? ' Theme: ' + bundleTag + '.' : ''}${count ? ' Asset count: ' + count + '.' : ''}
+Examples of good hooks: "27 souls. one curse.", "Where ancient evil sleeps.", "Steel and fire await."
+Rules: lowercase except proper nouns is fine, punchy, evocative, no hashtags, no emoji, no quotes around the hooks.
+Return ONLY JSON, no markdown: {"hooks":["...","...","..."]}`;
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) return res.status(502).json({ error: data?.error?.message || 'Claude API error' });
+    let text = '';
+    if (Array.isArray(data.content)) text = data.content.map(c => c.type === 'text' ? c.text : '').join('').trim();
+    text = text.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```\s*$/, '').trim();
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch (e) {
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) try { parsed = JSON.parse(m[0]); } catch(_){}
+      if (!parsed) return res.status(502).json({ error: 'AI parse failed', raw: text.slice(0, 300) });
+    }
+    const hooks = Array.isArray(parsed.hooks) ? parsed.hooks.filter(h => typeof h === 'string' && h.trim()).slice(0, 3) : [];
+    if (!hooks.length) return res.status(502).json({ error: 'No hooks generated' });
+    res.json({ ok: true, hooks });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ETSY OPEN API v3 — Vollautomatische Draft-Listing-Erstellung
+//
+// Flow: /api/etsy/connect (OAuth2+PKCE) → Callback speichert Tokens (Supabase)
+//       → /api/etsy/draft-listing → /api/etsy/listing/:id/image (Cover/Galerie)
+//       → /api/etsy/listing/:id/file (Digital-ZIP, max 5 × 20MB)
+//
+// Benötigte Railway-ENV-Variable: ETSY_KEYSTRING (API Key von etsy.com/developers)
+// Registrierte Callback-URL der Etsy-App MUSS exakt sein:
+//   https://endocraft-production.up.railway.app/api/etsy/callback
+// ═══════════════════════════════════════════════════════════════════════════
+const ETSY_KEYSTRING = process.env.ETSY_KEYSTRING;
+const ETSY_REDIRECT_URI = process.env.ETSY_REDIRECT_URI || 'https://endocraft-production.up.railway.app/api/etsy/callback';
+const ETSY_SCOPES = 'listings_r listings_w shops_r';
+const ETSY_API = 'https://openapi.etsy.com';
+const etsyOAuthStates = new Map(); // state → { verifier, created } (10 Min TTL)
+let etsyTokens = null;             // In-Memory-Cache { access_token, refresh_token, expires_at, shop_id, shop_name, etsy_user_id }
+let etsyTaxonomyCache = null;      // Seller-Taxonomy (24h Cache)
+
+function b64url(buf) { return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+
+async function etsySupaLoad() {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/etsy_tokens?id=eq.1&select=*&limit=1`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    const data = await r.json();
+    if (r.ok && Array.isArray(data) && data.length) return data[0];
+  } catch (e) { console.warn('[etsy] supa load failed', e.message); }
+  return null;
+}
+async function etsySupaSave(t) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/etsy_tokens?on_conflict=id`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates'
+      },
+      body: JSON.stringify({ id: 1, ...t, updated_at: new Date().toISOString() })
+    });
+  } catch (e) { console.warn('[etsy] supa save failed', e.message); }
+}
+
+async function etsyGetToken() {
+  if (!etsyTokens) etsyTokens = await etsySupaLoad();
+  if (!etsyTokens || !etsyTokens.refresh_token) throw new Error('Etsy nicht verbunden — erst /api/etsy/connect durchlaufen');
+  const expiresAt = new Date(etsyTokens.expires_at || 0).getTime();
+  if (Date.now() < expiresAt - 90000) return etsyTokens.access_token;
+  // Refresh
+  const body = new URLSearchParams({ grant_type: 'refresh_token', client_id: ETSY_KEYSTRING, refresh_token: etsyTokens.refresh_token });
+  const r = await fetch('https://api.etsy.com/v3/public/oauth/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error('Etsy token refresh failed: ' + (data?.error_description || data?.error || r.status));
+  etsyTokens = {
+    ...etsyTokens,
+    access_token: data.access_token,
+    refresh_token: data.refresh_token || etsyTokens.refresh_token,
+    expires_at: new Date(Date.now() + (data.expires_in || 3600) * 1000).toISOString()
+  };
+  await etsySupaSave(etsyTokens);
+  return etsyTokens.access_token;
+}
+
+async function etsyFetch(path, opts = {}) {
+  const token = await etsyGetToken();
+  const headers = { 'x-api-key': ETSY_KEYSTRING, 'Authorization': `Bearer ${token}`, ...(opts.headers || {}) };
+  return fetch(ETSY_API + path, { ...opts, headers });
+}
+
+// ─── OAuth Start ───
+app.get('/api/etsy/connect', (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).send('ETSY_KEYSTRING fehlt in den Railway-Variablen. Erst App auf etsy.com/developers registrieren.');
+  const verifier = b64url(crypto.randomBytes(32));
+  const challenge = b64url(crypto.createHash('sha256').update(verifier).digest());
+  const state = crypto.randomBytes(16).toString('hex');
+  etsyOAuthStates.set(state, { verifier, created: Date.now() });
+  for (const [k, v] of etsyOAuthStates) if (Date.now() - v.created > 600000) etsyOAuthStates.delete(k);
+  const url = 'https://www.etsy.com/oauth/connect?' + new URLSearchParams({
+    response_type: 'code', client_id: ETSY_KEYSTRING, redirect_uri: ETSY_REDIRECT_URI,
+    scope: ETSY_SCOPES, state, code_challenge: challenge, code_challenge_method: 'S256'
+  });
+  res.redirect(url);
+});
+
+// ─── OAuth Callback ───
+app.get('/api/etsy/callback', async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+  const page = (title, body, ok) => res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title><style>body{background:#10131c;color:#e9e4d6;font-family:Georgia,serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}div{text-align:center;max-width:480px;padding:40px;border:1px solid ${ok ? '#7bbd8f' : '#d98a8a'};border-radius:14px}h1{color:${ok ? '#d8b46a' : '#d98a8a'};font-size:22px}p{color:#9aa0b3;line-height:1.6}</style></head><body><div><h1>${title}</h1><p>${body}</p></div></body></html>`);
+  if (error) return page('Etsy-Verbindung abgelehnt', String(error_description || error), false);
+  const st = etsyOAuthStates.get(state);
+  if (!st) return page('Ungültiger State', 'OAuth-State unbekannt oder abgelaufen. Bitte den Connect-Flow neu starten.', false);
+  etsyOAuthStates.delete(state);
+  try {
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code', client_id: ETSY_KEYSTRING,
+      redirect_uri: ETSY_REDIRECT_URI, code, code_verifier: st.verifier
+    });
+    const r = await fetch('https://api.etsy.com/v3/public/oauth/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
+    });
+    const data = await r.json();
+    if (!r.ok) return page('Token-Tausch fehlgeschlagen', data?.error_description || data?.error || ('HTTP ' + r.status), false);
+    etsyTokens = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at: new Date(Date.now() + (data.expires_in || 3600) * 1000).toISOString(),
+      etsy_user_id: String(data.access_token).split('.')[0]
+    };
+    // Shop-Daten holen
+    const meR = await fetch(ETSY_API + '/v3/application/users/me', {
+      headers: { 'x-api-key': ETSY_KEYSTRING, 'Authorization': `Bearer ${etsyTokens.access_token}` }
+    });
+    const me = await meR.json();
+    if (meR.ok && me.shop_id) {
+      etsyTokens.shop_id = String(me.shop_id);
+      try {
+        const shopR = await fetch(`${ETSY_API}/v3/application/shops/${me.shop_id}`, { headers: { 'x-api-key': ETSY_KEYSTRING } });
+        const shop = await shopR.json();
+        if (shopR.ok) etsyTokens.shop_name = shop.shop_name;
+      } catch (_) {}
+    }
+    await etsySupaSave(etsyTokens);
+    return page('✓ Etsy verbunden', `Shop: <b style="color:#d8b46a">${etsyTokens.shop_name || etsyTokens.shop_id || 'gefunden'}</b><br><br>Du kannst dieses Fenster schließen und zurück zum Bundle Studio wechseln.`, true);
+  } catch (e) {
+    return page('Fehler', e.message, false);
+  }
+});
+
+// ─── Status ───
+app.get('/api/etsy/status', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.json({ connected: false, keystringConfigured: false });
+  try {
+    if (!etsyTokens) etsyTokens = await etsySupaLoad();
+    if (!etsyTokens || !etsyTokens.refresh_token) return res.json({ connected: false, keystringConfigured: true });
+    res.json({
+      connected: true, keystringConfigured: true,
+      shop_id: etsyTokens.shop_id || null, shop_name: etsyTokens.shop_name || null,
+      expires_at: etsyTokens.expires_at
+    });
+  } catch (e) { res.json({ connected: false, keystringConfigured: true, error: e.message }); }
+});
+
+// ─── Taxonomy-Suche (für taxonomy_id-Auswahl, 1× nötig, dann localStorage) ───
+app.get('/api/etsy/taxonomy', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  try {
+    if (!etsyTaxonomyCache || Date.now() - etsyTaxonomyCache.ts > 86400000) {
+      const r = await fetch(ETSY_API + '/v3/application/seller-taxonomy/nodes', { headers: { 'x-api-key': ETSY_KEYSTRING } });
+      const data = await r.json();
+      if (!r.ok) return res.status(502).json({ error: data?.error || 'Taxonomy fetch failed' });
+      const flat = [];
+      (function walk(nodes, path) {
+        for (const n of nodes || []) {
+          const p = path ? path + ' › ' + n.name : n.name;
+          flat.push({ id: n.id, name: n.name, path: p });
+          walk(n.children, p);
+        }
+      })(data.results, '');
+      etsyTaxonomyCache = { ts: Date.now(), flat };
+    }
+    const q = String(req.query.q || '').toLowerCase().trim();
+    let out = etsyTaxonomyCache.flat;
+    if (q) out = out.filter(n => n.path.toLowerCase().includes(q));
+    res.json({ ok: true, nodes: out.slice(0, 30) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Draft-Listing erstellen (type=download → Digital-Listing, KEIN Auto-Publish) ───
+app.post('/api/etsy/draft-listing', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  const { title, description, price, tags, taxonomy_id, quantity, materials } = req.body;
+  if (!title || !description || !price || !taxonomy_id) {
+    return res.status(400).json({ error: 'title, description, price, taxonomy_id required' });
+  }
+  try {
+    await etsyGetToken();
+    if (!etsyTokens.shop_id) return res.status(400).json({ error: 'Keine shop_id — Etsy neu verbinden' });
+    const body = new URLSearchParams({
+      quantity: String(quantity || 999),
+      title: String(title).slice(0, 140),
+      description: String(description),
+      price: String(price),
+      who_made: 'i_did',
+      when_made: 'made_to_order',
+      taxonomy_id: String(taxonomy_id),
+      type: 'download',
+      is_supply: 'false',
+      should_auto_renew: 'true'
+    });
+    if (Array.isArray(tags) && tags.length) {
+      body.set('tags', tags.slice(0, 13).map(t => String(t).slice(0, 20)).join(','));
+    }
+    if (Array.isArray(materials) && materials.length) body.set('materials', materials.slice(0, 13).join(','));
+    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings`, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
+    res.json({
+      ok: true, listing_id: data.listing_id, state: data.state,
+      edit_url: `https://www.etsy.com/your/shops/me/listing-editor/edit/${data.listing_id}`,
+      drafts_url: 'https://www.etsy.com/your/shops/me/listings?state=draft'
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Bild hochladen (Cover + Galerie; rank 1 = Hauptbild) ───
+app.post('/api/etsy/listing/:listingId/image', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  const { imageBase64, filename, rank } = req.body;
+  if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
+  try {
+    await etsyGetToken();
+    const buf = Buffer.from(String(imageBase64).replace(/^data:[^;]+;base64,/, ''), 'base64');
+    const fd = new FormData();
+    fd.append('image', new Blob([buf], { type: 'image/png' }), filename || 'cover.png');
+    if (rank) fd.append('rank', String(rank));
+    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings/${req.params.listingId}/images`, {
+      method: 'POST', body: fd
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
+    res.json({ ok: true, listing_image_id: data.listing_image_id, rank: data.rank });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Digital-File hochladen (max 5 Files à 20MB pro Listing — Etsy-Limit) ───
+app.post('/api/etsy/listing/:listingId/file', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  const { fileBase64, filename, rank } = req.body;
+  if (!fileBase64) return res.status(400).json({ error: 'fileBase64 required' });
+  try {
+    await etsyGetToken();
+    const buf = Buffer.from(String(fileBase64).replace(/^data:[^;]+;base64,/, ''), 'base64');
+    if (buf.length > 20 * 1024 * 1024) return res.status(400).json({ error: `File ${filename} ist ${(buf.length / 1048576).toFixed(1)}MB — Etsy-Limit ist 20MB pro File` });
+    const safeName = String(filename || 'bundle.zip').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 70);
+    const fd = new FormData();
+    fd.append('file', new Blob([buf], { type: 'application/zip' }), safeName);
+    fd.append('name', safeName);
+    if (rank) fd.append('rank', String(rank));
+    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings/${req.params.listingId}/files`, {
+      method: 'POST', body: fd
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
+    res.json({ ok: true, listing_file_id: data.listing_file_id, filename: data.filename, size: data.size });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
