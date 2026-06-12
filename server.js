@@ -1121,7 +1121,17 @@ app.post('/api/image', async (req, res) => {
     if (model.includes('grok')) {
       body.aspect_ratio = aspect_ratio || '2:3';
     } else if (model.includes('seedream')) {
-      body.image_size = { width: Math.max(width || 2048, 1440), height: Math.max(height || 2048, 1440) };
+      // Seedream-4.5 verlangt mindestens 3.686.400 Pixel — bei kleinerem Input auto-skalieren statt teurer Call der failed
+      let w = width || 2048, h = height || 2048;
+      const MIN_PX = 3686400;
+      if (w * h < MIN_PX) {
+        const scale = Math.sqrt(MIN_PX / (w * h));
+        const newW = Math.ceil(w * scale);
+        const newH = Math.ceil(h * scale);
+        console.log(`[seedream] auto-scaling ${w}x${h} (${w*h}px) → ${newW}x${newH} (${newW*newH}px) to meet 3.686.400 minimum`);
+        w = newW; h = newH;
+      }
+      body.image_size = { width: Math.max(w, 1440), height: Math.max(h, 1440) };
     } else if (model.includes('imagen')) {
       body.aspect_ratio = aspect_ratio || '3:4';
     } else {
@@ -2139,6 +2149,5 @@ ANTWORT-FORMAT (exaktes JSON):
     res.json({ ok: true, pins: parsed.pins || [], meta: { bundleName, count: numPins } });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 
 app.listen(PORT, () => console.log(`EndoCraft API running on port ${PORT}`));
