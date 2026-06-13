@@ -1113,11 +1113,22 @@ app.post('/api/hall-of-fame/recompute', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// EndoCraft Quality-Lock — wird zu jedem Asset-Prompt prepended (außer quality_lock:false)
+// Stellt sicher, dass die Bilder unsere Etsy-Versprechen halten:
+// - "No janky hands, no broken faces" → anatomically correct hands, sharp face
+// - "Cinematic consistent style" → photorealistic-cinematic, no oil painting
+// - "Premium D&D Pack" → fantasy art quality, no anime, no AI-amateur artifacts
+const QUALITY_LOCK_PREFIX = 'cinematic fantasy character portrait photography, photorealistic, masterpiece quality, professional studio lighting, sharp focus on face and eyes, anatomically correct hands with exactly 5 fingers each, hyperdetailed face with clear features, painterly D&D 5e cover art aesthetic (Wayne Reynolds / Tyler Jacobson style references), period-accurate medieval fantasy clothing, ';
+const QUALITY_LOCK_SUFFIX = ', NO anime style, NO oil painting roughness, NO deformed hands, NO extra fingers, NO modern haircuts or makeup, NO contemporary features, NO AI artifacts, NO blurry textures';
+
 app.post('/api/image', async (req, res) => {
   try {
-    const { prompt, model = 'flux-pro', width, height, aspect_ratio } = req.body;
+    const { prompt, model = 'flux-pro', width, height, aspect_ratio, quality_lock } = req.body;
     if (!prompt) return res.status(400).json({ error: 'Prompt required' });
-    const body = { model, prompt };
+    // Quality-Lock per default ON für character/NPC-style assets, deaktivierbar via quality_lock:false
+    const useLock = quality_lock !== false;
+    const lockedPrompt = useLock ? (QUALITY_LOCK_PREFIX + prompt + QUALITY_LOCK_SUFFIX) : prompt;
+    const body = { model, prompt: lockedPrompt };
     if (model.includes('grok')) {
       body.aspect_ratio = aspect_ratio || '2:3';
     } else if (model.includes('seedream')) {
@@ -2019,7 +2030,7 @@ app.post('/api/listing-generator', async (req, res) => {
 
   const targetMarketplace = ['etsy','dmsguild','gumroad','itch'].includes(marketplace) ? marketplace : 'all';
 
-  const systemPrompt = `Du bist ein erfahrener D&D-Marketplace-SEO-Texter. Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock.
+  const systemPrompt = `Du bist ein erfahrener D&D-Marketplace-SEO-Texter für EndoCraft. Antworte AUSSCHLIESSLICH mit gültigem JSON ohne Markdown-Codeblock.
 
 Du schreibst hochkonvertierende Listing-Texte für ein digitales D&D-Bundle:
 
@@ -2028,6 +2039,26 @@ ${tagline ? 'TAGLINE: ' + tagline : ''}
 TIER: ${tier || 'evergreen'} (${tierGuidance})
 ASSETS: ${assetCount || 'unbekannt'} Items
 ${Array.isArray(assetTitles) && assetTitles.length ? 'ASSET-LISTE:\n' + assetTitles.slice(0,30).map(t => '- ' + t).join('\n') : ''}
+
+BRAND-POSITIONIERUNG (WICHTIG · IMMER EINHALTEN):
+EndoCraft ist eine Ein-Personen-Studio, die AI-art-Asset-Packs für D&D-DMs kuratiert. NICHT generic AI-Spam — Premium-Curation ist das USP. Differentiatoren:
+- Jeder Asset PERSONALLY REVIEWED bevor er ins Bundle kommt (no janky hands, no broken faces)
+- Cinematic Style CONSISTENT über alle Bundle-Assets (nicht random AI-Batches)
+- Curated für spezifische D&D-Themes (canonical NPCs, on-theme Locations)
+- Affordable through AI (€10-20 Bundles statt €200+ Single-Artist-Portrait), Premium through Curation (one-person review)
+
+EHRLICHKEIT BEI AI-DISCLOSURE (ETSY-COMPLIANCE):
+- NIEMALS "hand-crafted", "handmade", "hand-painted", "hand-drawn" schreiben — das täuscht
+- IMMER nutzen: "AI-crafted, hand-curated" / "personally reviewed" / "cinematic" / "premium curation"
+- In jeder Description einen ehrlichen "Honest Disclosure"-Absatz (siehe Beispiel unten) integrieren der AI-Generation zugibt, aber als Feature framt (consistent style, affordable) — mit Human-Curation als Quality-Guarantee
+- Disclaimer-Sprache: "Portraits are AI-crafted with Seedream 4.5, then hand-curated and quality-reviewed before shipping. No spam autopilot — every asset eyeballed by a human."
+
+ETSY-DESCRIPTION-STRUKTUR (mandatory layout):
+1. Premium-Hook (1 Satz, packend, story-driven)
+2. "WHY THIS ISN'T GENERIC AI" — 4 bullet checkmarks die die Differentiatoren listen
+3. "WHAT'S INCLUDED" — Asset-Listen-Bullets
+4. "HONEST DISCLOSURE" — kurzer Absatz wie oben definiert
+5. "INSTANT DOWNLOAD" — File-Format-Info + Use-Case-Note + Lizenz-Info
 
 REGELN:
 - Titles: 3 Varianten, max 140 Zeichen, FRONT-LOADED mit den wichtigsten Keywords (Etsy-Algo bevorzugt erste Worte)
@@ -2618,6 +2649,112 @@ app.post('/api/etsy/listing/:listingId/file', async (req, res) => {
     const data = await r.json();
     if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
     res.json({ ok: true, listing_file_id: data.listing_file_id, filename: data.filename, size: data.size });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FREE-PACK LEAD-MAGNET — Pinterest/Etsy Funnel
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/free-pack/subscribe', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase nicht konfiguriert' });
+  const { email, source, utm } = req.body || {};
+  const emailNorm = String(email || '').trim().toLowerCase();
+  if (!emailNorm || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+    return res.status(400).json({ error: 'Invalid email' });
+  }
+  const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
+  const ua = String(req.headers['user-agent'] || '').slice(0, 240);
+  const sourceClean = String(source || 'direct').slice(0, 40);
+  const utmClean = utm ? String(utm).slice(0, 400) : null;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal,resolution=ignore-duplicates'
+      },
+      body: JSON.stringify({ email: emailNorm, source: sourceClean, utm: utmClean, ip: ip || null, user_agent: ua })
+    });
+    if (!r.ok && r.status !== 409) {
+      const txt = await r.text().catch(() => ('http ' + r.status));
+      console.warn('[free-pack] supabase insert failed', r.status, txt.slice(0, 200));
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.warn('[free-pack] subscribe error', e.message);
+    res.json({ ok: true });
+  }
+});
+
+app.get('/api/free-pack/stats', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
+  const adminKey = process.env.ADMIN_KEY;
+  if (adminKey && req.query.key !== adminKey) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=source,created_at&order=created_at.desc&limit=500`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    const data = await r.json();
+    const total = Array.isArray(data) ? data.length : 0;
+    const bySource = {};
+    if (Array.isArray(data)) data.forEach(d => { bySource[d.source || 'direct'] = (bySource[d.source || 'direct'] || 0) + 1; });
+    res.json({ ok: true, total, bySource, latest: Array.isArray(data) ? data.slice(0, 10) : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ETSY LISTINGS · LIST + UPDATE (für Bulk-Update-Tool)
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/api/etsy/my-listings', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  try {
+    await etsyGetToken();
+    if (!etsyTokens.shop_id) return res.status(400).json({ error: 'Keine shop_id' });
+    const state = String(req.query.state || 'active');
+    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings?state=${state}&limit=100&includes=Images`, {
+      method: 'GET'
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
+    const listings = (data.results || []).map(l => ({
+      listing_id: l.listing_id,
+      title: l.title,
+      description: l.description,
+      price: l.price?.amount ? (l.price.amount / l.price.divisor) : null,
+      currency: l.price?.currency_code,
+      state: l.state,
+      url: l.url,
+      tags: l.tags || [],
+      taxonomy_id: l.taxonomy_id,
+      created: l.created_timestamp,
+      updated: l.last_modified_timestamp,
+      thumb: l.images?.[0]?.url_170x135 || null
+    }));
+    res.json({ ok: true, count: listings.length, listings });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/etsy/listing/:listingId', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  const { title, description, tags } = req.body || {};
+  if (!title && !description && !tags) return res.status(400).json({ error: 'title|description|tags required' });
+  try {
+    await etsyGetToken();
+    const body = new URLSearchParams();
+    if (title) body.set('title', String(title).slice(0, 140));
+    if (description) body.set('description', String(description));
+    if (Array.isArray(tags) && tags.length) body.set('tags', tags.slice(0, 13).map(t => String(t).slice(0, 20)).join(','));
+    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings/${req.params.listingId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
+    res.json({ ok: true, listing_id: data.listing_id, state: data.state });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
