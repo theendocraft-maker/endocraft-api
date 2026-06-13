@@ -2410,6 +2410,9 @@ Return ONLY JSON, no markdown: {"hooks":["...","...","..."]}`;
 //   https://endocraft-production.up.railway.app/api/etsy/callback
 // ═══════════════════════════════════════════════════════════════════════════
 const ETSY_KEYSTRING = process.env.ETSY_KEYSTRING;
+// Personal-Access-Apps: Etsy verlangt fuer data calls (shops/users) den Shared Secret im x-api-key Header.
+// Keystring (client_id) wird nur fuer OAuth (connect/refresh) genutzt. Fallback auf Keystring fuer Backwards-Compat.
+const ETSY_API_KEY = process.env.ETSY_API_KEY || process.env.ETSY_SHARED_SECRET || process.env.ETSY_KEYSTRING;
 const ETSY_REDIRECT_URI = process.env.ETSY_REDIRECT_URI || 'https://endocraft-production.up.railway.app/api/etsy/callback';
 const ETSY_SCOPES = 'listings_r listings_w shops_r';
 const ETSY_API = 'https://openapi.etsy.com';
@@ -2468,7 +2471,7 @@ async function etsyGetToken() {
 
 async function etsyFetch(path, opts = {}) {
   const token = await etsyGetToken();
-  const headers = { 'x-api-key': ETSY_KEYSTRING, 'Authorization': `Bearer ${token}`, ...(opts.headers || {}) };
+  const headers = { 'x-api-key': ETSY_API_KEY, 'Authorization': `Bearer ${token}`, ...(opts.headers || {}) };
   return fetch(ETSY_API + path, { ...opts, headers });
 }
 
@@ -2513,13 +2516,13 @@ app.get('/api/etsy/callback', async (req, res) => {
     };
     // Shop-Daten holen
     const meR = await fetch(ETSY_API + '/v3/application/users/me', {
-      headers: { 'x-api-key': ETSY_KEYSTRING, 'Authorization': `Bearer ${etsyTokens.access_token}` }
+      headers: { 'x-api-key': ETSY_API_KEY, 'Authorization': `Bearer ${etsyTokens.access_token}` }
     });
     const me = await meR.json();
     if (meR.ok && me.shop_id) {
       etsyTokens.shop_id = String(me.shop_id);
       try {
-        const shopR = await fetch(`${ETSY_API}/v3/application/shops/${me.shop_id}`, { headers: { 'x-api-key': ETSY_KEYSTRING } });
+        const shopR = await fetch(`${ETSY_API}/v3/application/shops/${me.shop_id}`, { headers: { 'x-api-key': ETSY_API_KEY } });
         const shop = await shopR.json();
         if (shopR.ok) etsyTokens.shop_name = shop.shop_name;
       } catch (_) {}
@@ -2550,7 +2553,7 @@ app.get('/api/etsy/taxonomy', async (req, res) => {
   if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
   try {
     if (!etsyTaxonomyCache || Date.now() - etsyTaxonomyCache.ts > 86400000) {
-      const r = await fetch(ETSY_API + '/v3/application/seller-taxonomy/nodes', { headers: { 'x-api-key': ETSY_KEYSTRING } });
+      const r = await fetch(ETSY_API + '/v3/application/seller-taxonomy/nodes', { headers: { 'x-api-key': ETSY_API_KEY } });
       const data = await r.json();
       if (!r.ok) return res.status(502).json({ error: data?.error || 'Taxonomy fetch failed' });
       const flat = [];
@@ -2780,7 +2783,7 @@ app.post('/api/etsy/fix-shop-info', async (req, res) => {
     if (!userId || !/^\d+$/.test(userId)) return res.status(400).json({ error: 'user_id konnte nicht extrahiert werden', userId });
     // /v3/application/users/{user_id}/shops liefert Shop-Info
     const shopR = await fetch(`${ETSY_API}/v3/application/users/${userId}/shops`, {
-      headers: { 'x-api-key': ETSY_KEYSTRING, 'Authorization': `Bearer ${token}` }
+      headers: { 'x-api-key': ETSY_API_KEY, 'Authorization': `Bearer ${token}` }
     });
     const shopData = await shopR.json();
     if (!shopR.ok) return res.status(502).json({ error: 'shop-fetch failed', status: shopR.status, raw: JSON.stringify(shopData).slice(0, 400) });
