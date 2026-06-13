@@ -2766,6 +2766,15 @@ app.post('/api/etsy/fix-shop-info', async (req, res) => {
   try {
     const token = await etsyGetToken();
     if (!etsyTokens) return res.status(400).json({ error: 'Etsy nicht verbunden' });
+    // Manual-Override: shop_id direkt im Body — fuer Faelle wo lookup blockiert ist
+    const manualShopId = req.body?.shop_id || req.query?.shop_id;
+    const manualShopName = req.body?.shop_name || req.query?.shop_name;
+    if (manualShopId) {
+      etsyTokens.shop_id = String(manualShopId);
+      etsyTokens.shop_name = manualShopName || etsyTokens.shop_name || null;
+      await etsySupaSave(etsyTokens);
+      return res.json({ ok: true, shop_id: etsyTokens.shop_id, shop_name: etsyTokens.shop_name, method: 'manual' });
+    }
     // user_id aus access_token (Format: USER_ID.JWT_SUFFIX)
     const userId = etsyTokens.etsy_user_id || String(etsyTokens.access_token).split('.')[0];
     if (!userId || !/^\d+$/.test(userId)) return res.status(400).json({ error: 'user_id konnte nicht extrahiert werden', userId });
@@ -2782,7 +2791,7 @@ app.post('/api/etsy/fix-shop-info', async (req, res) => {
     etsyTokens.shop_name = shopName || null;
     etsyTokens.etsy_user_id = userId;
     await etsySupaSave(etsyTokens);
-    res.json({ ok: true, shop_id: etsyTokens.shop_id, shop_name: etsyTokens.shop_name, user_id: userId });
+    res.json({ ok: true, shop_id: etsyTokens.shop_id, shop_name: etsyTokens.shop_name, user_id: userId, method: 'auto' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
