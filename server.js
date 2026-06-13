@@ -2758,5 +2758,33 @@ app.patch('/api/etsy/listing/:listingId', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ETSY · Manual Shop-Info-Fix (fuer Faelle wo /users/me kein shop_id liefert)
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/etsy/fix-shop-info', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  try {
+    const token = await etsyGetToken();
+    if (!etsyTokens) return res.status(400).json({ error: 'Etsy nicht verbunden' });
+    // user_id aus access_token (Format: USER_ID.JWT_SUFFIX)
+    const userId = etsyTokens.etsy_user_id || String(etsyTokens.access_token).split('.')[0];
+    if (!userId || !/^\d+$/.test(userId)) return res.status(400).json({ error: 'user_id konnte nicht extrahiert werden', userId });
+    // /v3/application/users/{user_id}/shops liefert Shop-Info
+    const shopR = await fetch(`${ETSY_API}/v3/application/users/${userId}/shops`, {
+      headers: { 'x-api-key': ETSY_KEYSTRING, 'Authorization': `Bearer ${token}` }
+    });
+    const shopData = await shopR.json();
+    if (!shopR.ok) return res.status(502).json({ error: 'shop-fetch failed', status: shopR.status, raw: JSON.stringify(shopData).slice(0, 400) });
+    const shopId = shopData.shop_id || shopData.results?.[0]?.shop_id;
+    const shopName = shopData.shop_name || shopData.results?.[0]?.shop_name;
+    if (!shopId) return res.status(404).json({ error: 'Kein Shop gefunden fuer user_id', userId, raw: JSON.stringify(shopData).slice(0, 400) });
+    etsyTokens.shop_id = String(shopId);
+    etsyTokens.shop_name = shopName || null;
+    etsyTokens.etsy_user_id = userId;
+    await etsySupaSave(etsyTokens);
+    res.json({ ok: true, shop_id: etsyTokens.shop_id, shop_name: etsyTokens.shop_name, user_id: userId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 
 app.listen(PORT, () => console.log(`EndoCraft API running on port ${PORT}`));
