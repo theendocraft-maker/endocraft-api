@@ -2752,10 +2752,119 @@ app.get('/api/etsy/my-listings', async (req, res) => {
       taxonomy_id: l.taxonomy_id,
       created: l.created_timestamp,
       updated: l.last_modified_timestamp,
+      views: l.views || 0,
+      num_favorers: l.num_favorers || 0,
+      quantity: l.quantity || 0,
       thumb: l.images?.[0]?.url_170x135 || null
     }));
     res.json({ ok: true, count: listings.length, listings });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Etsy receipts (sales) for cockpit
+app.get('/api/etsy/receipts', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  const adminKey = process.env.ADMIN_KEY;
+  if (adminKey && req.query.key !== adminKey) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    await etsyGetToken();
+    if (!etsyTokens.shop_id) return res.status(400).json({ error: 'Keine shop_id' });
+    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/receipts?limit=100`, { method: 'GET' });
+    const data = await r.json();
+    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
+    const receipts = (data.results || []).map(r => ({
+      receipt_id: r.receipt_id,
+      created: r.create_timestamp,
+      buyer_name: r.name || null,
+      total: r.grandtotal?.amount ? (r.grandtotal.amount / r.grandtotal.divisor) : null,
+      currency: r.grandtotal?.currency_code || 'EUR',
+      status: r.status,
+      is_paid: !!r.is_paid,
+      is_shipped: !!r.is_shipped,
+      transactions: (r.transactions || []).map(t => ({
+        listing_id: t.listing_id,
+        title: t.title,
+        quantity: t.quantity,
+        price: t.price?.amount ? (t.price.amount / t.price.divisor) : null
+      }))
+    }));
+    const totalRevenue = receipts.reduce((s, r) => s + (r.total || 0), 0);
+    res.json({ ok: true, count: receipts.length, totalRevenue, receipts });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Cockpit: aggregated business overview
+app.get('/api/cockpit/overview', async (req, res) => {
+  const adminKey = process.env.ADMIN_KEY;
+  if (!adminKey || req.query.key !== adminKey) return res.status(401).json({ error: 'unauthorized' });
+  const result = { ok: true, ts: new Date().toISOString() };
+
+  // Leads
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=email,source,utm,created_at&order=created_at.desc&limit=2000`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    const leads = await r.json();
+    if (Array.isArray(leads)) {
+      const bySource = {};
+      leads.forEach(l => { bySource[l.source || 'direct'] = (bySource[l.source || 'direct'] || 0) + 1; });
+      // last 7 days
+      const cutoff7d = Date.now() - 7 * 86400 * 1000;
+      const last7d = leads.filter(l => new Date(l.created_at).getTime() > cutoff7d).length;
+      result.leads = { total: leads.length, bySource, last7d, recent: leads.slice(0, 5) };
+    }
+  } catch (e) { result.leads = { error: e.message }; }
+
+  // Etsy listings
+  try {
+    await etsyGetToken();
+    if (etsyTokens.shop_id) {
+      const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings?state=active&limit=100&includes=Images`, { method: 'GET' });
+      const data = await r.json();
+      const listings = (data.results || []).map(l => ({
+        listing_id: l.listing_id,
+        title: l.title,
+        price: l.price?.amount ? (l.price.amount / l.price.divisor) : null,
+        currency: l.price?.currency_code,
+        url: l.url,
+        views: l.views || 0,
+        num_favorers: l.num_favorers || 0,
+        quantity: l.quantity || 0,
+        thumb: l.images?.[0]?.url_170x135 || null
+      }));
+      const totalViews = listings.reduce((s, l) => s + l.views, 0);
+      const totalFavorites = listings.reduce((s, l) => s + l.num_favorers, 0);
+      result.etsy = {
+        listingCount: listings.length,
+        totalViews,
+        totalFavorites,
+        listings: listings.sort((a, b) => b.views - a.views)
+      };
+    } else {
+      result.etsy = { error: 'shop_id missing — visit /api/etsy/fix-shop-info' };
+    }
+  } catch (e) { result.etsy = { error: e.message }; }
+
+  // Etsy receipts
+  try {
+    if (etsyTokens.shop_id) {
+      const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/receipts?limit=100`, { method: 'GET' });
+      const data = await r.json();
+      const receipts = (data.results || []).map(r => ({
+        receipt_id: r.receipt_id,
+        created: r.create_timestamp,
+        buyer_name: r.name || null,
+        total: r.grandtotal?.amount ? (r.grandtotal.amount / r.grandtotal.divisor) : null,
+        currency: r.grandtotal?.currency_code || 'EUR',
+        status: r.status,
+        transactions: (r.transactions || []).map(t => ({ listing_id: t.listing_id, title: t.title }))
+      }));
+      const totalRevenue = receipts.reduce((s, r) => s + (r.total || 0), 0);
+      result.sales = { count: receipts.length, totalRevenue, recent: receipts.slice(0, 10) };
+    }
+  } catch (e) { result.sales = { error: e.message }; }
+
+  res.json(result);
 });
 
 app.patch('/api/etsy/listing/:listingId', async (req, res) => {
