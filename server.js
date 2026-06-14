@@ -2708,6 +2708,24 @@ app.get('/api/free-pack/stats', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Admin-only: full leads list with emails (for endocraft.app/admin/leads page)
+app.get('/api/free-pack/leads', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
+  const adminKey = process.env.ADMIN_KEY;
+  if (!adminKey) return res.status(500).json({ error: 'ADMIN_KEY not configured on backend' });
+  if (req.query.key !== adminKey) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,source,utm,created_at,ip&order=created_at.desc&limit=2000`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    const data = await r.json();
+    if (!Array.isArray(data)) return res.status(502).json({ error: 'Supabase invalid response', raw: data });
+    const bySource = {};
+    data.forEach(d => { bySource[d.source || 'direct'] = (bySource[d.source || 'direct'] || 0) + 1; });
+    res.json({ ok: true, total: data.length, bySource, leads: data });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ETSY LISTINGS · LIST + UPDATE (für Bulk-Update-Tool)
 // ═══════════════════════════════════════════════════════════════════════════
