@@ -2692,6 +2692,85 @@ app.post('/api/free-pack/subscribe', async (req, res) => {
   }
 });
 
+// ─── Wishes-Feature · Adventure-Wünsche von /free thank-you Screen ───
+// Linked-mode: PATCHes free_pack_leads.wish by email
+// Anon-mode: separate row mit email=null (für Etsy Shop Announcement traffic)
+app.post('/api/wishes/submit', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase nicht konfiguriert' });
+  const { email, wish, source } = req.body || {};
+  const wishClean = String(wish || '').trim().slice(0, 1000);
+  if (!wishClean) return res.status(400).json({ error: 'wish required' });
+  const emailNorm = email ? String(email).trim().toLowerCase() : null;
+  const sourceClean = String(source || 'direct').slice(0, 40);
+  try {
+    if (emailNorm && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+      // Linked mode — PATCH existing lead. If no lead exists yet, insert anon row.
+      const patchUrl = `${SUPABASE_URL}/rest/v1/free_pack_leads?email=eq.${encodeURIComponent(emailNorm)}`;
+      const r = await fetch(patchUrl, {
+        method: 'PATCH',
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=representation'
+        },
+        body: JSON.stringify({ wish: wishClean })
+      });
+      const data = await r.json().catch(() => []);
+      // If patch found no rows (Array.isArray && length 0), insert new row
+      if (Array.isArray(data) && data.length === 0) {
+        const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
+        await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads`, {
+          method: 'POST',
+          headers: {
+            'apikey': SUPABASE_KEY,
+            'Authorization': `Bearer ${SUPABASE_KEY}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'return=minimal'
+          },
+          body: JSON.stringify({ email: emailNorm, source: sourceClean, wish: wishClean, ip: ip || null })
+        });
+      }
+      return res.json({ ok: true, mode: 'linked' });
+    }
+    // Anon mode — wish ohne email (für Etsy Shop Announcement)
+    const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
+    await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal'
+      },
+      body: JSON.stringify({ email: null, source: sourceClean, wish: wishClean, ip: ip || null })
+    });
+    res.json({ ok: true, mode: 'anon' });
+  } catch (e) {
+    console.warn('[wishes] submit error', e.message);
+    res.json({ ok: true });
+  }
+});
+
+// ─── Admin-only: Wishes-Liste für Cockpit ───
+app.get('/api/wishes', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
+  const adminKey = process.env.ADMIN_KEY;
+  if (!adminKey) return res.status(500).json({ error: 'ADMIN_KEY not configured' });
+  if (req.query.key !== adminKey) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,wish,source,created_at&wish=not.is.null&order=created_at.desc&limit=500`;
+    const r = await fetch(url, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    const data = await r.json();
+    const items = Array.isArray(data) ? data : [];
+    res.json({ total: items.length, items });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/free-pack/stats', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
   const adminKey = process.env.ADMIN_KEY;
