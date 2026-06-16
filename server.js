@@ -56,6 +56,199 @@ function checkAdminKey(req, res) {
   return true;
 }
 
+// ─── Resend Email-Integration (prepared 2026-06-16) ───
+// Activates only when RESEND_API_KEY is set. Until then: all email-functions are no-op.
+// Setup steps (when Marco signs up at resend.com):
+// 1. npm install resend (already in package.json)
+// 2. Set RESEND_API_KEY env in Railway
+// 3. Run supabase-migrations/008_welcome_email_columns.sql
+// 4. Verify endocraft.app DNS (SPF + DKIM via Resend dashboard)
+// 5. Deploy + scheduled-task welcome-email-cron is auto-triggered
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const RESEND_FROM = process.env.RESEND_FROM || 'Marco @ EndoCraft <hello@endocraft.app>';
+let resendClient = null;
+if (RESEND_API_KEY) {
+  try {
+    const { Resend } = require('resend');
+    resendClient = new Resend(RESEND_API_KEY);
+    console.log('[email] Resend client initialized');
+  } catch (e) {
+    console.warn('[email] Resend not installed yet — run: npm install resend');
+  }
+}
+
+// Email-Templates · plain-text for high deliverability + Marco's voice
+function emailTemplate1Welcome(unsubToken) {
+  return `Hey,
+
+Thanks for grabbing the free pack.
+
+Inside the ZIP you'll find:
+- 5 high-res NPC portraits (1800x2400 PNG)
+- One quick-reference doc with names, traits, and plot hooks
+- A README that explains how I'd use each in a session
+
+Two things to know:
+
+1. Every face was reviewed by me before going in. AI does the heavy lifting (Seedream 4.5), but I keep the obvious AI tells out — janky hands, weird eyes, that uncanny stare. If you spot one I missed, hit reply and I'll fix it.
+
+2. No newsletter shotgun. I'll send maybe 2-3 more emails — useful D&D things, not "click here to buy". If even that's too much, the unsubscribe at the bottom kills it forever, no hard feelings.
+
+If you've got a sec — what adventure are you running next? I read every reply and use them to decide which packs to build next. Even one word ("Phandelver", "homebrew", "Frostmaiden") helps.
+
+Roll high,
+Marco
+
+---
+
+P.S. — There's a 10% discount code waiting on the thank-you page (WELCOME10) if you want to grab one of the premium packs. No pressure, just FYI.
+
+Download free pack again: https://endocraft.app/free/endocraft-free-pack.zip
+Browse premium packs on Etsy: https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1
+
+Unsubscribe: https://endocraft-production.up.railway.app/unsubscribe?token=${unsubToken}`;
+}
+
+function emailTemplate2ProTip(unsubToken) {
+  return `Hey,
+
+Quick one.
+
+Something that took me embarrassingly long to figure out as a DM: an NPC doesn't need a voice. They need three sentences you can deliver consistently.
+
+The format I steal from sitcom writers:
+
+1. ONE physical tic the players will see every time
+   ("constantly polishes a coin", "never makes eye contact", "rubs the scar on her wrist")
+
+2. ONE verbal habit
+   ("calls everyone 'friend' even when threatening", "starts every sentence with 'See, the thing is...'", "ends statements with a question")
+
+3. ONE thing they want from this scene
+   ("wants the party to leave so he can drink", "wants to impress them", "wants to find out who sent them")
+
+That's the entire NPC at the table level. The traits doc inside the free pack is built around exactly this — I put the physical tic, the verbal habit, and the want in three short lines.
+
+Try it on the next NPC you run. Even if everything else falls apart, those three things hold the character together.
+
+If you're prepping a specific session this week, hit reply with the adventure or scene — I'll write you three sentences in this format for a key NPC. Free, no catch. I just like writing them.
+
+Roll high,
+Marco
+
+---
+
+P.S. — One concrete example using a name from the free pack:
+
+Thalon Greycloak (Old Mercenary)
+- Constantly checks his blind side, like he's expecting an ambush
+- Calls every younger person "kid", even nobles
+- Wants someone — anyone — to admit the war wasn't worth it
+
+You can run him in any tavern scene right now.
+
+Browse premium packs on Etsy: https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_2
+Unsubscribe: https://endocraft-production.up.railway.app/unsubscribe?token=${unsubToken}`;
+}
+
+function emailTemplate3CoSHint(unsubToken) {
+  return `Hey,
+
+Last email from me for a while (I promised — 2-3 mails max).
+
+A few people who grabbed the free pack told me they're running Curse of Strahd. So if that's you, here's what I built for it.
+
+The Curse of Strahd Master Pack has 39 assets:
+
+NPC PORTRAITS (12)
+- Strahd von Zarovich, Ireena Kolyana, Ismark, Madam Eva, Father Donavich
+- Rictavio, Van Richten, Ezmerelda, Vasili von Holtz
+- Three Vistani (Eva's daughters)
+
+LOCATIONS (8)
+- Castle Ravenloft (interior + exterior)
+- Village of Barovia gates, Burgomaster's house, the Tavern
+- Svalich Road in fog, Tser Pool encampment, Yester Hill
+
+BATTLE MAPS (4 grid-aligned)
+- Death House cellar, Old Bonegrinder mill, Argynvostholt great hall, Yester Hill druid circle
+
+MAGIC ITEMS (2)
+- Tome of Strahd, Holy Symbol of Ravenkind
+
+PLUS 13 atmospheric mood pieces for session-opener slides
+
+All 1800x2400 PNG, Roll20 + Foundry + Owlbear Rodeo ready. €14.99 on Etsy, less than a single VTT subscription month.
+
+I built it because when I ran my first CoS table, I wasted three sessions of prep time hunting for "good enough" NPC art that didn't look like 2015 stock photos. This pack is what I wish I'd had on day one.
+
+If you're prepping CoS — use WELCOME10 for 10% off:
+https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_3_cos
+
+If you're NOT prepping CoS, ignore this and good luck with whatever you're running. The Phandelver and Storm King packs are in the shop too.
+
+Either way — thanks for grabbing the free pack. I hope at least one of those five NPCs ends up at your table.
+
+Roll high,
+Marco
+
+---
+
+P.S. — If you read this all the way to here and you're NOT a DM but just curious about the art: hit reply. I'm always curious how non-DMs find this stuff.
+
+Unsubscribe: https://endocraft-production.up.railway.app/unsubscribe?token=${unsubToken}`;
+}
+
+// Send a welcome-email · no-op if Resend not configured
+async function sendWelcomeEmail(emailNumber, lead) {
+  if (!resendClient) {
+    console.log(`[email] Skipping email ${emailNumber} to ${lead.email} — Resend not configured`);
+    return { ok: true, skipped: true };
+  }
+  const subjects = {
+    1: 'Your D&D NPC pack is ready (and what\'s inside)',
+    2: 'A trick I use to make NPC voices stick at the table',
+    3: 'If you\'re prepping Curse of Strahd next...'
+  };
+  const templates = {
+    1: emailTemplate1Welcome,
+    2: emailTemplate2ProTip,
+    3: emailTemplate3CoSHint
+  };
+  const tmplFn = templates[emailNumber];
+  if (!tmplFn) {
+    console.warn(`[email] Unknown emailNumber: ${emailNumber}`);
+    return { ok: false, error: 'unknown email number' };
+  }
+  try {
+    const text = tmplFn(lead.unsubscribe_token);
+    await resendClient.emails.send({
+      from: RESEND_FROM,
+      to: [lead.email],
+      subject: subjects[emailNumber],
+      text
+    });
+    // Mark as sent in Supabase
+    if (SUPABASE_URL && SUPABASE_KEY) {
+      const patchUrl = `${SUPABASE_URL}/rest/v1/free_pack_leads?id=eq.${lead.id}`;
+      await fetchWithTimeout(patchUrl, {
+        method: 'PATCH',
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=minimal'
+        },
+        body: JSON.stringify({ [`email_${emailNumber}_sent_at`]: new Date().toISOString() })
+      });
+    }
+    return { ok: true };
+  } catch (e) {
+    console.error(`[email] Send failed: email ${emailNumber} to ${lead.email}`, e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'EndoCraft API' });
 });
@@ -2700,19 +2893,31 @@ app.post('/api/free-pack/subscribe', async (req, res) => {
   const sourceClean = String(source || 'direct').slice(0, 40);
   const utmClean = utm ? String(utm).slice(0, 400) : null;
   try {
+    // Insert + return-representation so we get back id + unsubscribe_token (needed for email 1)
     const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads`, {
       method: 'POST',
       headers: {
         'apikey': SUPABASE_KEY,
         'Authorization': `Bearer ${SUPABASE_KEY}`,
         'Content-Type': 'application/json',
-        'Prefer': 'return=minimal,resolution=ignore-duplicates'
+        'Prefer': 'return=representation,resolution=ignore-duplicates'
       },
       body: JSON.stringify({ email: emailNorm, source: sourceClean, utm: utmClean, ip: ip || null, user_agent: ua })
     });
     if (!r.ok && r.status !== 409) {
       const txt = await r.text().catch(() => ('http ' + r.status));
       console.warn('[free-pack] supabase insert failed', r.status, txt.slice(0, 200));
+    } else if (r.ok) {
+      // Trigger Email 1 (no-op if Resend not configured)
+      try {
+        const rows = await r.json();
+        const lead = Array.isArray(rows) ? rows[0] : rows;
+        if (lead && lead.id && lead.email) {
+          sendWelcomeEmail(1, lead).catch(err => console.warn('[email] email_1 trigger failed:', err.message));
+        }
+      } catch (parseErr) {
+        // Parse failure — Resend skip silently, signup still successful
+      }
     }
     res.json({ ok: true });
   } catch (e) {
@@ -3030,5 +3235,77 @@ app.post('/api/etsy/fix-shop-info', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ─── Welcome-Email Cron Endpoint (prepared 2026-06-16) ───
+// Called by scheduled-task endocraft-welcome-email-cron (to be created) daily at 09:00 Berlin.
+// Finds leads needing email 2 (T+3d) or email 3 (T+7d), sends them, marks as sent.
+// No-op if Resend not configured.
+app.get('/api/welcome-emails/cron-tick', async (req, res) => {
+  if (!checkAdminKey(req, res)) return;
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
+  if (!resendClient) return res.json({ ok: true, skipped: true, reason: 'Resend not configured' });
+  const results = { email_2_sent: 0, email_3_sent: 0, errors: [] };
+  try {
+    // Email 2: T+3d, sent_at_1 set, sent_at_2 null, not unsubscribed
+    const url2 = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,unsubscribe_token,email_1_sent_at&email_1_sent_at=not.is.null&email_2_sent_at=is.null&unsubscribed_at=is.null&email_1_sent_at=lt.${encodeURIComponent(new Date(Date.now() - 3*24*60*60*1000).toISOString())}&limit=50`;
+    const r2 = await fetchWithTimeout(url2, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    if (r2.ok) {
+      const leads2 = await r2.json();
+      for (const lead of leads2) {
+        const result = await sendWelcomeEmail(2, lead);
+        if (result.ok) results.email_2_sent++;
+        else results.errors.push({ leadId: lead.id, emailNum: 2, error: result.error });
+      }
+    }
+    // Email 3: T+7d, sent_at_2 set, sent_at_3 null
+    const url3 = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,unsubscribe_token,email_2_sent_at&email_2_sent_at=not.is.null&email_3_sent_at=is.null&unsubscribed_at=is.null&email_2_sent_at=lt.${encodeURIComponent(new Date(Date.now() - 4*24*60*60*1000).toISOString())}&limit=50`;
+    const r3 = await fetchWithTimeout(url3, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    if (r3.ok) {
+      const leads3 = await r3.json();
+      for (const lead of leads3) {
+        const result = await sendWelcomeEmail(3, lead);
+        if (result.ok) results.email_3_sent++;
+        else results.errors.push({ leadId: lead.id, emailNum: 3, error: result.error });
+      }
+    }
+    res.json({ ok: true, ts: new Date().toISOString(), ...results });
+  } catch (e) {
+    console.error('[welcome-email cron-tick] failed:', e.message);
+    res.status(500).json({ ok: false, error: e.message, ...results });
+  }
+});
+
+// ─── Unsubscribe Endpoint (prepared 2026-06-16) ───
+app.get('/unsubscribe', async (req, res) => {
+  const token = String(req.query.token || '').trim();
+  if (!token || !/^[0-9a-f-]{36}$/i.test(token)) {
+    return res.status(400).send('<html><body style="font-family:sans-serif;text-align:center;padding:50px;color:#333">Invalid unsubscribe link. <br><br><a href="/">Back to EndoCraft</a></body></html>');
+  }
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).send('Server config error');
+  try {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads?unsubscribe_token=eq.${token}`, {
+      method: 'PATCH',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal'
+      },
+      body: JSON.stringify({ unsubscribed_at: new Date().toISOString() })
+    });
+    if (!r.ok) {
+      return res.status(500).send('<html><body style="font-family:sans-serif;text-align:center;padding:50px;color:#333">Something went wrong. Please reply to any email and I\'ll manually remove you. — Marco</body></html>');
+    }
+    res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:50px;color:#333;background:#0a0e16;color:#e8d990">
+      <h1 style="color:#d4af37">You're unsubscribed.</h1>
+      <p>No more emails from EndoCraft. No hard feelings.</p>
+      <p>If you change your mind, just hit endocraft.app/free again.</p>
+      <p>— Marco</p>
+      <p><a style="color:#d4af37;" href="https://endocraft.app/">Back to EndoCraft</a></p>
+    </body></html>`);
+  } catch (e) {
+    res.status(500).send('<html><body style="font-family:sans-serif;text-align:center;padding:50px">Unable to process. Reply to any email and I\'ll remove you manually. — Marco</body></html>');
+  }
+});
 
 app.listen(PORT, () => console.log(`EndoCraft API running on port ${PORT}`));
