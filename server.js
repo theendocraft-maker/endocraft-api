@@ -27,6 +27,35 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const PORT = process.env.PORT || 8080;
 
+// ─── Backend Hardening Helpers (added 2026-06-16) ───
+// Why: prevent indefinite hangs when downstream services are slow/dead.
+// Wraps fetch with AbortController for timeout support. Default 45s for AI calls.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 45000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Admin-Auth-Helper: accepts ADMIN_KEY via query (?key=) OR header (x-admin-key).
+// Returns 401 if invalid, 500 if ADMIN_KEY not configured server-side. Returns true if ok (no response written).
+function checkAdminKey(req, res) {
+  const adminKey = process.env.ADMIN_KEY;
+  if (!adminKey) {
+    res.status(500).json({ error: 'ADMIN_KEY not configured' });
+    return false;
+  }
+  const provided = req.query.key || req.headers['x-admin-key'];
+  if (provided !== adminKey) {
+    res.status(401).json({ error: 'unauthorized' });
+    return false;
+  }
+  return true;
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'EndoCraft API' });
 });
@@ -44,7 +73,7 @@ app.post('/api/chat', async (req, res) => {
     system: `${rarityModifier}\n\n${req.body.system || ''}`
   };
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -163,7 +192,7 @@ LOCATIONS-DB:
 ${locationsDump || '(keine)'}
 `;
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({ model, max_tokens, system: systemPrompt, messages })
@@ -196,7 +225,7 @@ app.post('/api/dm-studio/save', async (req, res) => {
   if (!email || !campaignId) return res.status(400).json({ error: 'email + campaignId required' });
   try {
     const normalized = String(email).toLowerCase().trim();
-    const resp = await fetch(`${SUPABASE_URL}/rest/v1/dm_studio_state?on_conflict=user_email,campaign_id`, {
+    const resp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/dm_studio_state?on_conflict=user_email,campaign_id`, {
       method: 'POST',
       headers: {
         'apikey': SUPABASE_KEY,
@@ -219,7 +248,7 @@ app.get('/api/dm-studio/load', async (req, res) => {
   try {
     const normalized = String(email).toLowerCase().trim();
     const url = `${SUPABASE_URL}/rest/v1/dm_studio_state?user_email=eq.${encodeURIComponent(normalized)}&campaign_id=eq.${encodeURIComponent(campaignId)}&select=*&limit=1`;
-    const resp = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const resp = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json({ error: data?.message || 'Supabase error' });
     if (!Array.isArray(data) || !data.length) return res.json({ found: false });
@@ -234,7 +263,7 @@ app.get('/api/dm-studio/campaigns', async (req, res) => {
   try {
     const normalized = String(email).toLowerCase().trim();
     const url = `${SUPABASE_URL}/rest/v1/dm_studio_state?user_email=eq.${encodeURIComponent(normalized)}&select=campaign_id,updated_at`;
-    const resp = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const resp = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const data = await resp.json();
     res.status(resp.status).json({ campaigns: Array.isArray(data) ? data : [] });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -265,7 +294,7 @@ app.post('/api/parties/create', async (req, res) => {
     let lastErr = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = generatePartyCode(name);
-      const insertResp = await fetch(`${SUPABASE_URL}/rest/v1/parties`, {
+      const insertResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/parties`, {
         method: 'POST',
         headers: {
           'apikey': SUPABASE_KEY,
@@ -279,7 +308,7 @@ app.post('/api/parties/create', async (req, res) => {
       if (insertResp.ok && partyData?.[0]?.id) {
         const party = partyData[0];
         // DM auch als Member eintragen
-        await fetch(`${SUPABASE_URL}/rest/v1/party_members`, {
+        await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/party_members`, {
           method: 'POST',
           headers: {
             'apikey': SUPABASE_KEY,
@@ -309,13 +338,13 @@ app.post('/api/parties/join', async (req, res) => {
     const normalizedCode = String(code).toUpperCase().trim();
     // Find party by code (case-insensitive)
     const findUrl = `${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(normalizedCode)}&select=*&limit=1`;
-    const findResp = await fetch(findUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const findResp = await fetchWithTimeout(findUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const parties = await findResp.json();
     if (!findResp.ok) return res.status(findResp.status).json({ error: parties?.message || 'Lookup failed' });
     if (!Array.isArray(parties) || !parties.length) return res.status(404).json({ error: 'Code nicht gefunden' });
     const party = parties[0];
     // Add as member (idempotent via UNIQUE constraint)
-    const insertResp = await fetch(`${SUPABASE_URL}/rest/v1/party_members?on_conflict=party_id,email`, {
+    const insertResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/party_members?on_conflict=party_id,email`, {
       method: 'POST',
       headers: {
         'apikey': SUPABASE_KEY,
@@ -340,7 +369,7 @@ app.get('/api/parties/list', async (req, res) => {
     const normalized = String(email).toLowerCase().trim();
     // Get all party_member rows for this email, joined with parties
     const url = `${SUPABASE_URL}/rest/v1/party_members?email=eq.${encodeURIComponent(normalized)}&select=role,display_name,joined_at,parties(id,code,name,dm_email,campaign_id,created_at)`;
-    const resp = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const resp = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json({ error: data?.message || 'List failed' });
     res.json({ parties: Array.isArray(data) ? data : [] });
@@ -352,11 +381,11 @@ app.get('/api/parties/:code/members', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
   const code = String(req.params.code || '').toUpperCase().trim();
   try {
-    const findResp = await fetch(`${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(code)}&select=id,name,dm_email&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const findResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(code)}&select=id,name,dm_email&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const parties = await findResp.json();
     if (!Array.isArray(parties) || !parties.length) return res.status(404).json({ error: 'Code nicht gefunden' });
     const party = parties[0];
-    const memResp = await fetch(`${SUPABASE_URL}/rest/v1/party_members?party_id=eq.${party.id}&select=email,role,display_name,joined_at&order=joined_at.asc`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const memResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/party_members?party_id=eq.${party.id}&select=email,role,display_name,joined_at&order=joined_at.asc`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const members = await memResp.json();
     res.json({ party, members: Array.isArray(members) ? members : [] });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -402,13 +431,13 @@ app.get('/api/parties/:code/sessions', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
   const code = String(req.params.code || '').toUpperCase().trim();
   try {
-    const findResp = await fetch(`${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(code)}&select=id,name,dm_email,unlocks,card_count&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const findResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(code)}&select=id,name,dm_email,unlocks,card_count&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const parties = await findResp.json();
     if (!Array.isArray(parties) || !parties.length) return res.status(404).json({ error: 'Code nicht gefunden' });
     const party = parties[0];
 
     // Members holen
-    const memResp = await fetch(`${SUPABASE_URL}/rest/v1/party_members?party_id=eq.${party.id}&select=email,display_name,role`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const memResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/party_members?party_id=eq.${party.id}&select=email,display_name,role`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const members = await memResp.json();
     const emails = Array.isArray(members) ? members.map(m => m.email) : [];
     if (!emails.length) return res.json({ party, members: [], sessions: [], cards: [], unlocks: party.unlocks || [], progress: progressTowardNext(0, party.unlocks || []), milestones: PARTY_MILESTONES });
@@ -422,7 +451,7 @@ app.get('/api/parties/:code/sessions', async (req, res) => {
     let allSessions = [];
     try {
       const sessUrl = `${SUPABASE_URL}/rest/v1/sessions?owner_slug=in.(${slugs.map(s => '"' + s + '"').join(',')})&select=*&order=created_at.desc&limit=200`;
-      const sessResp = await fetch(sessUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+      const sessResp = await fetchWithTimeout(sessUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
       if (sessResp.ok) {
         const sessData = await sessResp.json();
         if (Array.isArray(sessData)) allSessions = sessData;
@@ -433,7 +462,7 @@ app.get('/api/parties/:code/sessions', async (req, res) => {
     let cards = [];
     try {
       const cardsUrl = `${SUPABASE_URL}/rest/v1/cards?owner_slug=in.(${slugs.map(s => '"' + s + '"').join(',')})&select=id,number,session_title,legendary_moment,character_name,character_class,rarity,image_url,owner_slug,created_at&order=created_at.desc&limit=200`;
-      const cardsResp = await fetch(cardsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+      const cardsResp = await fetchWithTimeout(cardsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
       if (cardsResp.ok) {
         const cardsData = await cardsResp.json();
         if (Array.isArray(cardsData)) cards = cardsData;
@@ -460,7 +489,7 @@ app.get('/api/parties/:code/sessions', async (req, res) => {
 
     if (newlyUnlocked.length || party.card_count !== cardCount) {
       try {
-        await fetch(`${SUPABASE_URL}/rest/v1/parties?id=eq.${party.id}`, {
+        await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/parties?id=eq.${party.id}`, {
           method: 'PATCH',
           headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ unlocks: finalUnlocks, card_count: cardCount })
@@ -490,12 +519,12 @@ app.post('/api/parties/:code/leave', async (req, res) => {
   if (!email) return res.status(400).json({ error: 'email required' });
   try {
     const normalized = String(email).toLowerCase().trim();
-    const findResp = await fetch(`${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(code)}&select=id,dm_email&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const findResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/parties?code=eq.${encodeURIComponent(code)}&select=id,dm_email&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const parties = await findResp.json();
     if (!Array.isArray(parties) || !parties.length) return res.status(404).json({ error: 'Code nicht gefunden' });
     const party = parties[0];
     if (party.dm_email === normalized) return res.status(400).json({ error: 'DM kann nicht austreten — Party muss gelöscht werden' });
-    const delResp = await fetch(`${SUPABASE_URL}/rest/v1/party_members?party_id=eq.${party.id}&email=eq.${encodeURIComponent(normalized)}`, {
+    const delResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/party_members?party_id=eq.${party.id}&email=eq.${encodeURIComponent(normalized)}`, {
       method: 'DELETE',
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
     });
@@ -515,7 +544,7 @@ app.post('/api/cards/:id/vote', async (req, res) => {
   try {
     const normalized = String(email).toLowerCase().trim();
     const v = vote === 0 ? 0 : 1;
-    const upsertResp = await fetch(`${SUPABASE_URL}/rest/v1/card_votes?on_conflict=card_id,voter_email`, {
+    const upsertResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/card_votes?on_conflict=card_id,voter_email`, {
       method: 'POST',
       headers: {
         'apikey': SUPABASE_KEY,
@@ -529,7 +558,7 @@ app.post('/api/cards/:id/vote', async (req, res) => {
       const txt = await upsertResp.text();
       return res.status(upsertResp.status).json({ error: txt.slice(0, 300) });
     }
-    const statsResp = await fetch(`${SUPABASE_URL}/rest/v1/card_stats?card_id=eq.${encodeURIComponent(cardId)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const statsResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/card_stats?card_id=eq.${encodeURIComponent(cardId)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const stats = await statsResp.json();
     res.json({ ok: true, stats: Array.isArray(stats) ? stats[0] || null : null });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -540,13 +569,13 @@ app.get('/api/cards/:id/votes', async (req, res) => {
   const cardId = String(req.params.id || '').trim();
   const { email } = req.query;
   try {
-    const statsResp = await fetch(`${SUPABASE_URL}/rest/v1/card_stats?card_id=eq.${encodeURIComponent(cardId)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const statsResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/card_stats?card_id=eq.${encodeURIComponent(cardId)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const statsArr = await statsResp.json();
     const stats = Array.isArray(statsArr) ? statsArr[0] || { vote_count: 0, trending_score: 0 } : { vote_count: 0, trending_score: 0 };
     let myVote = 0;
     if (email) {
       const normalized = String(email).toLowerCase().trim();
-      const myResp = await fetch(`${SUPABASE_URL}/rest/v1/card_votes?card_id=eq.${encodeURIComponent(cardId)}&voter_email=eq.${encodeURIComponent(normalized)}&select=vote&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+      const myResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/card_votes?card_id=eq.${encodeURIComponent(cardId)}&voter_email=eq.${encodeURIComponent(normalized)}&select=vote&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
       const my = await myResp.json();
       if (Array.isArray(my) && my.length) myVote = my[0].vote || 0;
     }
@@ -560,14 +589,14 @@ app.get('/api/hall-of-fame/trending', async (req, res) => {
   const sort = req.query.sort === 'all-time' ? 'vote_count' : 'trending_score';
   try {
     const statsUrl = `${SUPABASE_URL}/rest/v1/card_stats?select=card_id,vote_count,trending_score&order=${sort}.desc&limit=${limit}`;
-    const statsResp = await fetch(statsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const statsResp = await fetchWithTimeout(statsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const stats = await statsResp.json();
     if (!Array.isArray(stats) || !stats.length) return res.json({ cards: [] });
     const ids = stats.map(s => s.card_id);
     const fetchByIds = async (table) => {
       try {
         const url = `${SUPABASE_URL}/rest/v1/${table}?id=in.(${ids.map(i => '"' + i + '"').join(',')})&select=*`;
-        const r = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+        const r = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
         const d = await r.json();
         return Array.isArray(d) ? d : [];
       } catch (e) { return []; }
@@ -722,7 +751,7 @@ ANTWORT-FORMAT (exakt dieses JSON-Schema):
 }`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
@@ -788,7 +817,7 @@ app.post('/api/invites/create', async (req, res) => {
       invited_by: String(invitedBy).toLowerCase().trim(),
       expires_at: expires
     };
-    const resp = await fetch(`${SUPABASE_URL}/rest/v1/character_invites`, {
+    const resp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/character_invites`, {
       method: 'POST',
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
       body: JSON.stringify(body)
@@ -804,7 +833,7 @@ app.get('/api/invites/:token', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
   const token = String(req.params.token || '').trim();
   try {
-    const resp = await fetch(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const resp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const data = await resp.json();
     if (!Array.isArray(data) || !data.length) return res.status(404).json({ error: 'Invite nicht gefunden' });
     const inv = data[0];
@@ -825,7 +854,7 @@ app.post('/api/invites/:token/accept', async (req, res) => {
   try {
     const normalized = String(email).toLowerCase().trim();
     // Invite holen
-    const findResp = await fetch(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const findResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}&select=*&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const invs = await findResp.json();
     if (!Array.isArray(invs) || !invs.length) return res.status(404).json({ error: 'Invite nicht gefunden' });
     const inv = invs[0];
@@ -839,7 +868,7 @@ app.post('/api/invites/:token/accept', async (req, res) => {
       character_id: inv.character_id || null,
       character_name: inv.character_name || null
     };
-    const memResp = await fetch(`${SUPABASE_URL}/rest/v1/campaign_members?on_conflict=campaign_id,dm_email,member_email`, {
+    const memResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/campaign_members?on_conflict=campaign_id,dm_email,member_email`, {
       method: 'POST',
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=representation' },
       body: JSON.stringify(memBody)
@@ -847,7 +876,7 @@ app.post('/api/invites/:token/accept', async (req, res) => {
     const memData = await memResp.json();
     // Invite als used markieren (nicht-blockierend)
     if (!inv.used_by) {
-      await fetch(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}`, {
+      await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}`, {
         method: 'PATCH',
         headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ used_by: normalized, used_at: new Date().toISOString() })
@@ -871,7 +900,7 @@ app.get('/api/invites/by-campaign', async (req, res) => {
   try {
     const dm = String(dmEmail).toLowerCase().trim();
     const url = `${SUPABASE_URL}/rest/v1/character_invites?dm_email=eq.${encodeURIComponent(dm)}&campaign_id=eq.${encodeURIComponent(campaignId)}&select=*&order=created_at.desc`;
-    const resp = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const resp = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const data = await resp.json();
     res.json({ invites: Array.isArray(data) ? data : [] });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -886,7 +915,7 @@ app.get('/api/campaigns/:dmEmail/:campaignId/album', async (req, res) => {
   if (!dmEmail || !campaignId) return res.status(400).json({ error: 'dmEmail + campaignId required' });
   try {
     // Members holen (inkl. DM)
-    const memResp = await fetch(`${SUPABASE_URL}/rest/v1/campaign_members?dm_email=eq.${encodeURIComponent(dmEmail)}&campaign_id=eq.${encodeURIComponent(campaignId)}&select=member_email,member_role,character_name,character_id`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const memResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/campaign_members?dm_email=eq.${encodeURIComponent(dmEmail)}&campaign_id=eq.${encodeURIComponent(campaignId)}&select=member_email,member_role,character_name,character_id`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const members = await memResp.json();
     const memberList = Array.isArray(members) ? members : [];
     // DM auch immer dabei (falls nicht in members)
@@ -905,7 +934,7 @@ app.get('/api/campaigns/:dmEmail/:campaignId/album', async (req, res) => {
     const fetchSlugTable = async (table, fields) => {
       try {
         const url = `${SUPABASE_URL}/rest/v1/${table}?owner_slug=in.(${slugs.map(s => '"' + s + '"').join(',')})&select=${fields}&order=created_at.desc&limit=200`;
-        const r = await fetch(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+        const r = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
         if (!r.ok) return [];
         const d = await r.json();
         return Array.isArray(d) ? d : [];
@@ -929,7 +958,7 @@ app.get('/api/campaigns/by-member', async (req, res) => {
   if (!email) return res.status(400).json({ error: 'email required' });
   try {
     const normalized = String(email).toLowerCase().trim();
-    const resp = await fetch(`${SUPABASE_URL}/rest/v1/campaign_members?member_email=eq.${encodeURIComponent(normalized)}&select=*&order=joined_at.desc`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const resp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/campaign_members?member_email=eq.${encodeURIComponent(normalized)}&select=*&order=joined_at.desc`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const data = await resp.json();
     res.json({ memberships: Array.isArray(data) ? data : [] });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -940,7 +969,7 @@ app.post('/api/invites/:token/revoke', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
   const token = String(req.params.token || '').trim();
   try {
-    const resp = await fetch(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}`, {
+    const resp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/character_invites?token=eq.${encodeURIComponent(token)}`, {
       method: 'DELETE',
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
     });
@@ -973,7 +1002,7 @@ app.post('/api/live/request', async (req, res) => {
       visibility: visibility === 'dm_only' ? 'dm_only' : 'public',
       expires_at: expiresAt
     };
-    const resp = await fetch(`${SUPABASE_URL}/rest/v1/roll_requests`, {
+    const resp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/roll_requests`, {
       method: 'POST',
       headers: {
         'apikey': SUPABASE_KEY,
@@ -1022,7 +1051,7 @@ app.post('/api/live/roll', async (req, res) => {
       result_kind: resultKind,
       visibility: visibility === 'dm_only' ? 'dm_only' : 'public'
     };
-    const resp = await fetch(`${SUPABASE_URL}/rest/v1/live_rolls`, {
+    const resp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/live_rolls`, {
       method: 'POST',
       headers: {
         'apikey': SUPABASE_KEY,
@@ -1053,9 +1082,9 @@ app.get('/api/live/stream/:partyCode', async (req, res) => {
       rollsUrl = `${SUPABASE_URL}/rest/v1/live_rolls?party_code=eq.${encodeURIComponent(code)}&select=*&order=created_at.desc&limit=50`;
       reqsUrl  = `${SUPABASE_URL}/rest/v1/roll_requests?party_code=eq.${encodeURIComponent(code)}&resolved_at=is.null&select=*&order=created_at.desc&limit=20`;
     }
-    const rollsResp = await fetch(rollsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const rollsResp = await fetchWithTimeout(rollsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const rolls = await rollsResp.json();
-    const reqResp = await fetch(reqsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const reqResp = await fetchWithTimeout(reqsUrl, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const requests = await reqResp.json();
     res.json({
       rolls: Array.isArray(rolls) ? rolls : [],
@@ -1070,7 +1099,7 @@ app.post('/api/live/request/:id/cancel', async (req, res) => {
   const id = parseInt(req.params.id);
   if (!id) return res.status(400).json({ error: 'invalid id' });
   try {
-    const resp = await fetch(`${SUPABASE_URL}/rest/v1/roll_requests?id=eq.${id}`, {
+    const resp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/roll_requests?id=eq.${id}`, {
       method: 'PATCH',
       headers: {
         'apikey': SUPABASE_KEY,
@@ -1086,23 +1115,23 @@ app.post('/api/live/request/:id/cancel', async (req, res) => {
 app.post('/api/hall-of-fame/recompute', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
   try {
-    const allResp = await fetch(`${SUPABASE_URL}/rest/v1/card_stats?select=card_id,vote_count`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const allResp = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/card_stats?select=card_id,vote_count`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const all = await allResp.json();
     if (!Array.isArray(all)) return res.status(500).json({ error: 'Cannot read card_stats' });
     let updated = 0;
     for (const row of all) {
       let createdAt = null;
-      const sessR = await fetch(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${encodeURIComponent(row.card_id)}&select=created_at&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+      const sessR = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/sessions?id=eq.${encodeURIComponent(row.card_id)}&select=created_at&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
       const sess = await sessR.json();
       if (Array.isArray(sess) && sess.length) createdAt = sess[0].created_at;
       if (!createdAt) {
-        const cardR = await fetch(`${SUPABASE_URL}/rest/v1/cards?id=eq.${encodeURIComponent(row.card_id)}&select=created_at&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+        const cardR = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/cards?id=eq.${encodeURIComponent(row.card_id)}&select=created_at&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
         const card = await cardR.json();
         if (Array.isArray(card) && card.length) createdAt = card[0].created_at;
       }
       const ageDays = createdAt ? (Date.now() - new Date(createdAt).getTime()) / 86400000 : 0;
       const score = (row.vote_count || 0) * Math.exp(-ageDays / 7);
-      await fetch(`${SUPABASE_URL}/rest/v1/card_stats?card_id=eq.${encodeURIComponent(row.card_id)}`, {
+      await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/card_stats?card_id=eq.${encodeURIComponent(row.card_id)}`, {
         method: 'PATCH',
         headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ trending_score: score, updated_at: new Date().toISOString() })
@@ -1149,7 +1178,7 @@ app.post('/api/image', async (req, res) => {
       if (width) body.width = width;
       if (height) body.height = height;
     }
-    const response = await fetch('https://api.aimlapi.com/v1/images/generations', {
+    const response = await fetchWithTimeout('https://api.aimlapi.com/v1/images/generations', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1173,7 +1202,7 @@ app.post('/api/image/fast', async (req, res) => {
   try {
     const { prompt } = req.body;
     if (!prompt) return res.status(400).json({ error: 'Prompt required' });
-    const startRes = await fetch('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
+    const startRes = await fetchWithTimeout('https://api.replicate.com/v1/models/black-forest-labs/flux-schnell/predictions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1190,7 +1219,7 @@ app.post('/api/image/fast', async (req, res) => {
     let attempts = 0;
     while (result.status !== 'succeeded' && result.status !== 'failed' && attempts < 30) {
       await new Promise(r => setTimeout(r, 1000));
-      const pollRes = await fetch(`https://api.replicate.com/v1/predictions/${result.id}`, {
+      const pollRes = await fetchWithTimeout(`https://api.replicate.com/v1/predictions/${result.id}`, {
         headers: { 'Authorization': `Bearer ${REPLICATE_KEY}` }
       });
       result = await pollRes.json();
@@ -1234,7 +1263,7 @@ app.get('/api/image/proxy', async (req, res) => {
       console.warn('[image proxy] blocked host:', host);
       return res.status(403).json({ error: 'host not allow-listed', host });
     }
-    const upstream = await fetch(u.toString(), { redirect: 'follow' });
+    const upstream = await fetchWithTimeout(u.toString(), { redirect: 'follow' });
     if (!upstream.ok) return res.status(502).json({ error: 'upstream ' + upstream.status });
     const ctype = upstream.headers.get('content-type') || '';
     if (!ctype.startsWith('image/')) {
@@ -1262,7 +1291,7 @@ app.post('/api/subscribe', async (req, res) => {
     if (!SUPABASE_URL || !SUPABASE_KEY) {
       return res.status(500).json({ error: 'Supabase not configured' });
     }
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/subscribers`, {
+    const response = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/subscribers`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1316,14 +1345,14 @@ app.post('/api/save-card', async (req, res) => {
     if (updateId && hasRealEmail && /^[a-f0-9-]{10,}$/i.test(updateId)) {
       // Upsert subscribers (best-effort)
       try {
-        await fetch(`${SUPABASE_URL}/rest/v1/subscribers`, {
+        await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/subscribers`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Prefer': 'return=minimal' },
           body: JSON.stringify({ email: email.toLowerCase().trim(), source: card.source || 'card-claim' })
         });
       } catch (e) { console.warn('subscribe-on-claim failed:', e.message); }
 
-      const patchRes = await fetch(`${SUPABASE_URL}/rest/v1/cards?id=eq.${encodeURIComponent(updateId)}`, {
+      const patchRes = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/cards?id=eq.${encodeURIComponent(updateId)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Prefer': 'return=representation' },
         body: JSON.stringify({ email: effectiveEmail, owner_slug: ownerSlug })
@@ -1353,7 +1382,7 @@ app.post('/api/save-card', async (req, res) => {
     // ─── INSERT path (anonymous or first-time email save)
     if (hasRealEmail) {
       try {
-        await fetch(`${SUPABASE_URL}/rest/v1/subscribers`, {
+        await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/subscribers`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Prefer': 'return=minimal' },
           body: JSON.stringify({ email: effectiveEmail, source: card.source || 'card' })
@@ -1377,7 +1406,7 @@ app.post('/api/save-card', async (req, res) => {
       seed_hash: card.seed_hash || null
     };
 
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/cards`, {
+    const response = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/cards`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Prefer': 'return=representation' },
       body: JSON.stringify(body)
@@ -1422,7 +1451,7 @@ app.get('/api/my-cards', async (req, res) => {
       return res.status(500).json({ error: 'Supabase not configured' });
     }
     // Query via service_role (bypasses RLS, but filtered by slug)
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${SUPABASE_URL}/rest/v1/cards?owner_slug=eq.${encodeURIComponent(slug)}&select=id,number,misprint_number,session_title,legendary_moment,character_name,character_class,rarity,visible_roll,image_url,created_at&order=created_at.desc`,
       {
         headers: {
@@ -1456,7 +1485,7 @@ async function fetchCardById(id) {
   if (!id || !/^[a-f0-9-]{10,}$/i.test(id)) return null;
   if (!SUPABASE_URL || !SUPABASE_KEY) return null;
   try {
-    const r = await fetch(
+    const r = await fetchWithTimeout(
       `${SUPABASE_URL}/rest/v1/cards?id=eq.${encodeURIComponent(id)}&select=id,number,misprint_number,session_title,legendary_moment,character_name,character_class,rarity,visible_roll,image_url,created_at&limit=1`,
       { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } }
     );
@@ -1494,7 +1523,7 @@ app.get('/img/:id', async (req, res) => {
     return res.redirect(302, 'https://endocraft.app/IMG_8431.PNG');
   }
   try {
-    const imgRes = await fetch(src);
+    const imgRes = await fetchWithTimeout(src);
     if (!imgRes.ok) {
       console.warn('img proxy upstream status:', imgRes.status, 'for', src);
       return res.redirect(302, 'https://endocraft.app/IMG_8431.PNG');
@@ -1899,7 +1928,7 @@ app.post('/api/my-cards/lookup', async (req, res) => {
 app.get('/api/subscriber-count', async (req, res) => {
   try {
     if (!SUPABASE_URL || !SUPABASE_KEY) return res.json({ count: 0 });
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/subscribers?select=email&limit=1`, {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/subscribers?select=email&limit=1`, {
       headers: {
         'apikey': SUPABASE_KEY,
         'Authorization': `Bearer ${SUPABASE_KEY}`,
@@ -1961,7 +1990,7 @@ Return ONLY valid JSON in this exact shape:
 Focus on what makes this campaign unique. Cross-link entries via connections. secrets should only appear when genuinely interesting.`;
 
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const r = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2086,7 +2115,7 @@ ANTWORT-FORMAT (exakt dieses JSON-Schema, kein Markdown):
 }`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
@@ -2155,7 +2184,7 @@ ANTWORT-FORMAT (exaktes JSON):
 }`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
@@ -2220,7 +2249,7 @@ ANTWORT-FORMAT:
 }`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
@@ -2329,7 +2358,7 @@ ANTWORT-FORMAT (exakt dieses JSON):
 Generiere die EXAKTE Anzahl pro Slot wie angefordert. Jeder Concept-Modifier ist 1-2 spezifische Sätze die in einen Image-Prompt eingefügt werden.`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
@@ -2370,7 +2399,7 @@ Examples of good hooks: "27 souls. one curse.", "Where ancient evil sleeps.", "S
 Rules: lowercase except proper nouns is fine, punchy, evocative, no hashtags, no emoji, no quotes around the hooks.
 Return ONLY JSON, no markdown: {"hooks":["...","...","..."]}`;
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
@@ -2425,7 +2454,7 @@ function b64url(buf) { return buf.toString('base64').replace(/\+/g, '-').replace
 async function etsySupaLoad() {
   if (!SUPABASE_URL || !SUPABASE_KEY) return null;
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/etsy_tokens?id=eq.1&select=*&limit=1`, {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/etsy_tokens?id=eq.1&select=*&limit=1`, {
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
     });
     const data = await r.json();
@@ -2436,7 +2465,7 @@ async function etsySupaLoad() {
 async function etsySupaSave(t) {
   if (!SUPABASE_URL || !SUPABASE_KEY) return;
   try {
-    await fetch(`${SUPABASE_URL}/rest/v1/etsy_tokens?on_conflict=id`, {
+    await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/etsy_tokens?on_conflict=id`, {
       method: 'POST',
       headers: {
         'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
@@ -2454,7 +2483,7 @@ async function etsyGetToken() {
   if (Date.now() < expiresAt - 90000) return etsyTokens.access_token;
   // Refresh
   const body = new URLSearchParams({ grant_type: 'refresh_token', client_id: ETSY_KEYSTRING, refresh_token: etsyTokens.refresh_token });
-  const r = await fetch('https://api.etsy.com/v3/public/oauth/token', {
+  const r = await fetchWithTimeout('https://api.etsy.com/v3/public/oauth/token', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
   });
   const data = await r.json();
@@ -2503,7 +2532,7 @@ app.get('/api/etsy/callback', async (req, res) => {
       grant_type: 'authorization_code', client_id: ETSY_KEYSTRING,
       redirect_uri: ETSY_REDIRECT_URI, code, code_verifier: st.verifier
     });
-    const r = await fetch('https://api.etsy.com/v3/public/oauth/token', {
+    const r = await fetchWithTimeout('https://api.etsy.com/v3/public/oauth/token', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
     });
     const data = await r.json();
@@ -2515,14 +2544,14 @@ app.get('/api/etsy/callback', async (req, res) => {
       etsy_user_id: String(data.access_token).split('.')[0]
     };
     // Shop-Daten holen
-    const meR = await fetch(ETSY_API + '/v3/application/users/me', {
+    const meR = await fetchWithTimeout(ETSY_API + '/v3/application/users/me', {
       headers: { 'x-api-key': ETSY_API_KEY, 'Authorization': `Bearer ${etsyTokens.access_token}` }
     });
     const me = await meR.json();
     if (meR.ok && me.shop_id) {
       etsyTokens.shop_id = String(me.shop_id);
       try {
-        const shopR = await fetch(`${ETSY_API}/v3/application/shops/${me.shop_id}`, { headers: { 'x-api-key': ETSY_API_KEY } });
+        const shopR = await fetchWithTimeout(`${ETSY_API}/v3/application/shops/${me.shop_id}`, { headers: { 'x-api-key': ETSY_API_KEY } });
         const shop = await shopR.json();
         if (shopR.ok) etsyTokens.shop_name = shop.shop_name;
       } catch (_) {}
@@ -2553,7 +2582,7 @@ app.get('/api/etsy/taxonomy', async (req, res) => {
   if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
   try {
     if (!etsyTaxonomyCache || Date.now() - etsyTaxonomyCache.ts > 86400000) {
-      const r = await fetch(ETSY_API + '/v3/application/seller-taxonomy/nodes', { headers: { 'x-api-key': ETSY_API_KEY } });
+      const r = await fetchWithTimeout(ETSY_API + '/v3/application/seller-taxonomy/nodes', { headers: { 'x-api-key': ETSY_API_KEY } });
       const data = await r.json();
       if (!r.ok) return res.status(502).json({ error: data?.error || 'Taxonomy fetch failed' });
       const flat = [];
@@ -2671,7 +2700,7 @@ app.post('/api/free-pack/subscribe', async (req, res) => {
   const sourceClean = String(source || 'direct').slice(0, 40);
   const utmClean = utm ? String(utm).slice(0, 400) : null;
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads`, {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads`, {
       method: 'POST',
       headers: {
         'apikey': SUPABASE_KEY,
@@ -2706,7 +2735,7 @@ app.post('/api/wishes/submit', async (req, res) => {
     if (emailNorm && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
       // Linked mode — PATCH existing lead. If no lead exists yet, insert anon row.
       const patchUrl = `${SUPABASE_URL}/rest/v1/free_pack_leads?email=eq.${encodeURIComponent(emailNorm)}`;
-      const r = await fetch(patchUrl, {
+      const r = await fetchWithTimeout(patchUrl, {
         method: 'PATCH',
         headers: {
           'apikey': SUPABASE_KEY,
@@ -2720,7 +2749,7 @@ app.post('/api/wishes/submit', async (req, res) => {
       // If patch found no rows (Array.isArray && length 0), insert new row
       if (Array.isArray(data) && data.length === 0) {
         const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
-        await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads`, {
+        await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads`, {
           method: 'POST',
           headers: {
             'apikey': SUPABASE_KEY,
@@ -2735,7 +2764,7 @@ app.post('/api/wishes/submit', async (req, res) => {
     }
     // Anon mode — wish ohne email (für Etsy Shop Announcement)
     const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
-    await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads`, {
+    await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads`, {
       method: 'POST',
       headers: {
         'apikey': SUPABASE_KEY,
@@ -2755,12 +2784,10 @@ app.post('/api/wishes/submit', async (req, res) => {
 // ─── Admin-only: Wishes-Liste für Cockpit ───
 app.get('/api/wishes', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
-  const adminKey = process.env.ADMIN_KEY;
-  if (!adminKey) return res.status(500).json({ error: 'ADMIN_KEY not configured' });
-  if (req.query.key !== adminKey) return res.status(401).json({ error: 'unauthorized' });
+  if (!checkAdminKey(req, res)) return;
   try {
     const url = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,wish,source,created_at&wish=not.is.null&order=created_at.desc&limit=500`;
-    const r = await fetch(url, {
+    const r = await fetchWithTimeout(url, {
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
     });
     const data = await r.json();
@@ -2773,10 +2800,9 @@ app.get('/api/wishes', async (req, res) => {
 
 app.get('/api/free-pack/stats', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
-  const adminKey = process.env.ADMIN_KEY;
-  if (adminKey && req.query.key !== adminKey) return res.status(401).json({ error: 'unauthorized' });
+  if (!checkAdminKey(req, res)) return;
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=source,created_at&order=created_at.desc&limit=500`, {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=source,created_at&order=created_at.desc&limit=500`, {
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
     });
     const data = await r.json();
@@ -2790,11 +2816,13 @@ app.get('/api/free-pack/stats', async (req, res) => {
 // Admin-only: full leads list with emails (for endocraft.app/admin/leads page)
 app.get('/api/free-pack/leads', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
-  const adminKey = process.env.ADMIN_KEY;
-  if (!adminKey) return res.status(500).json({ error: 'ADMIN_KEY not configured on backend' });
-  if (req.query.key !== adminKey) return res.status(401).json({ error: 'unauthorized' });
+  if (!checkAdminKey(req, res)) return;
+  // IP is PII — only include when explicitly requested via ?with_ip=1 (for anti-spam investigation)
+  const selectCols = req.query.with_ip === '1'
+    ? 'id,email,source,utm,created_at,ip'
+    : 'id,email,source,utm,created_at';
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,source,utm,created_at,ip&order=created_at.desc&limit=2000`, {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=${selectCols}&order=created_at.desc&limit=2000`, {
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
     });
     const data = await r.json();
@@ -2843,8 +2871,7 @@ app.get('/api/etsy/my-listings', async (req, res) => {
 // Etsy receipts (sales) for cockpit
 app.get('/api/etsy/receipts', async (req, res) => {
   if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
-  const adminKey = process.env.ADMIN_KEY;
-  if (adminKey && req.query.key !== adminKey) return res.status(401).json({ error: 'unauthorized' });
+  if (!checkAdminKey(req, res)) return;
   try {
     await etsyGetToken();
     if (!etsyTokens.shop_id) return res.status(400).json({ error: 'Keine shop_id' });
@@ -2874,13 +2901,12 @@ app.get('/api/etsy/receipts', async (req, res) => {
 
 // Cockpit: aggregated business overview
 app.get('/api/cockpit/overview', async (req, res) => {
-  const adminKey = process.env.ADMIN_KEY;
-  if (!adminKey || req.query.key !== adminKey) return res.status(401).json({ error: 'unauthorized' });
+  if (!checkAdminKey(req, res)) return;
   const result = { ok: true, ts: new Date().toISOString() };
 
   // Leads
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=email,source,utm,created_at&order=created_at.desc&limit=2000`, {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=email,source,utm,created_at&order=created_at.desc&limit=2000`, {
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
     });
     const leads = await r.json();
@@ -2988,7 +3014,7 @@ app.post('/api/etsy/fix-shop-info', async (req, res) => {
     const userId = etsyTokens.etsy_user_id || String(etsyTokens.access_token).split('.')[0];
     if (!userId || !/^\d+$/.test(userId)) return res.status(400).json({ error: 'user_id konnte nicht extrahiert werden', userId });
     // /v3/application/users/{user_id}/shops liefert Shop-Info
-    const shopR = await fetch(`${ETSY_API}/v3/application/users/${userId}/shops`, {
+    const shopR = await fetchWithTimeout(`${ETSY_API}/v3/application/users/${userId}/shops`, {
       headers: { 'x-api-key': ETSY_API_KEY, 'Authorization': `Bearer ${token}` }
     });
     const shopData = await shopR.json();
