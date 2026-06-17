@@ -3040,4 +3040,449 @@ app.get('/api/free-pack/leads', async (req, res) => {
     if (!Array.isArray(data)) return res.status(502).json({ error: 'Supabase invalid response', raw: data });
     const bySource = {};
     data.forEach(d => { bySource[d.source || 'direct'] = (bySource[d.source || 'direct'] || 0) + 1; });
-    res.json({ ok: true, total: data.length,
+    res.json({ ok: true, total: data.length, bySource, leads: data });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ETSY LISTINGS · LIST + UPDATE (für Bulk-Update-Tool)
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/api/etsy/my-listings', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  try {
+    await etsyGetToken();
+    if (!etsyTokens.shop_id) return res.status(400).json({ error: 'Keine shop_id' });
+    const state = String(req.query.state || 'active');
+    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings?state=${state}&limit=100&includes=Images`, {
+      method: 'GET'
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
+    const listings = (data.results || []).map(l => ({
+      listing_id: l.listing_id,
+      title: l.title,
+      description: l.description,
+      price: l.price?.amount ? (l.price.amount / l.price.divisor) : null,
+      currency: l.price?.currency_code,
+      state: l.state,
+      url: l.url,
+      tags: l.tags || [],
+      taxonomy_id: l.taxonomy_id,
+      created: l.created_timestamp,
+      updated: l.last_modified_timestamp,
+      views: l.views || 0,
+      num_favorers: l.num_favorers || 0,
+      quantity: l.quantity || 0,
+      thumb: l.images?.[0]?.url_170x135 || null
+    }));
+    res.json({ ok: true, count: listings.length, listings });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Etsy receipts (sales) for cockpit
+app.get('/api/etsy/receipts', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  if (!checkAdminKey(req, res)) return;
+  try {
+    await etsyGetToken();
+    if (!etsyTokens.shop_id) return res.status(400).json({ error: 'Keine shop_id' });
+    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/receipts?limit=100`, { method: 'GET' });
+    const data = await r.json();
+    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
+    const receipts = (data.results || []).map(r => ({
+      receipt_id: r.receipt_id,
+      created: r.create_timestamp,
+      buyer_name: r.name || null,
+      total: r.grandtotal?.amount ? (r.grandtotal.amount / r.grandtotal.divisor) : null,
+      currency: r.grandtotal?.currency_code || 'EUR',
+      status: r.status,
+      is_paid: !!r.is_paid,
+      is_shipped: !!r.is_shipped,
+      transactions: (r.transactions || []).map(t => ({
+        listing_id: t.listing_id,
+        title: t.title,
+        quantity: t.quantity,
+        price: t.price?.amount ? (t.price.amount / t.price.divisor) : null
+      }))
+    }));
+    const totalRevenue = receipts.reduce((s, r) => s + (r.total || 0), 0);
+    res.json({ ok: true, count: receipts.length, totalRevenue, receipts });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Cockpit: aggregated business overview
+app.get('/api/cockpit/overview', async (req, res) => {
+  if (!checkAdminKey(req, res)) return;
+  const result = { ok: true, ts: new Date().toISOString() };
+
+  // Leads
+  try {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=email,source,utm,created_at&order=created_at.desc&limit=2000`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    const leads = await r.json();
+    if (Array.isArray(leads)) {
+      const bySource = {};
+      leads.forEach(l => { bySource[l.source || 'direct'] = (bySource[l.source || 'direct'] || 0) + 1; });
+      // last 7 days
+      const cutoff7d = Date.now() - 7 * 86400 * 1000;
+      const last7d = leads.filter(l => new Date(l.created_at).getTime() > cutoff7d).length;
+      result.leads = { total: leads.length, bySource, last7d, recent: leads.slice(0, 5) };
+    }
+  } catch (e) { result.leads = { error: e.message }; }
+
+  // Etsy listings
+  try {
+    await etsyGetToken();
+    if (etsyTokens.shop_id) {
+      const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings?state=active&limit=100&includes=Images`, { method: 'GET' });
+      const data = await r.json();
+      const listings = (data.results || []).map(l => ({
+        listing_id: l.listing_id,
+        title: l.title,
+        price: l.price?.amount ? (l.price.amount / l.price.divisor) : null,
+        currency: l.price?.currency_code,
+        url: l.url,
+        views: l.views || 0,
+        num_favorers: l.num_favorers || 0,
+        quantity: l.quantity || 0,
+        thumb: l.images?.[0]?.url_170x135 || null
+      }));
+      const totalViews = listings.reduce((s, l) => s + l.views, 0);
+      const totalFavorites = listings.reduce((s, l) => s + l.num_favorers, 0);
+      result.etsy = {
+        listingCount: listings.length,
+        totalViews,
+        totalFavorites,
+        listings: listings.sort((a, b) => b.views - a.views)
+      };
+    } else {
+      result.etsy = { error: 'shop_id missing — visit /api/etsy/fix-shop-info' };
+    }
+  } catch (e) { result.etsy = { error: e.message }; }
+
+  // Etsy receipts
+  try {
+    if (etsyTokens.shop_id) {
+      const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/receipts?limit=100`, { method: 'GET' });
+      const data = await r.json();
+      const receipts = (data.results || []).map(r => ({
+        receipt_id: r.receipt_id,
+        created: r.create_timestamp,
+        buyer_name: r.name || null,
+        total: r.grandtotal?.amount ? (r.grandtotal.amount / r.grandtotal.divisor) : null,
+        currency: r.grandtotal?.currency_code || 'EUR',
+        status: r.status,
+        transactions: (r.transactions || []).map(t => ({ listing_id: t.listing_id, title: t.title }))
+      }));
+      const totalRevenue = receipts.reduce((s, r) => s + (r.total || 0), 0);
+      result.sales = { count: receipts.length, totalRevenue, recent: receipts.slice(0, 10) };
+    }
+  } catch (e) { result.sales = { error: e.message }; }
+
+  res.json(result);
+});
+
+app.patch('/api/etsy/listing/:listingId', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  const { title, description, tags } = req.body || {};
+  if (!title && !description && !tags) return res.status(400).json({ error: 'title|description|tags required' });
+  try {
+    await etsyGetToken();
+    const body = new URLSearchParams();
+    if (title) body.set('title', String(title).slice(0, 140));
+    if (description) body.set('description', String(description));
+    if (Array.isArray(tags) && tags.length) body.set('tags', tags.slice(0, 13).map(t => String(t).slice(0, 20)).join(','));
+    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings/${req.params.listingId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
+    res.json({ ok: true, listing_id: data.listing_id, state: data.state });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ETSY · Manual Shop-Info-Fix (fuer Faelle wo /users/me kein shop_id liefert)
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/etsy/fix-shop-info', async (req, res) => {
+  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
+  try {
+    const token = await etsyGetToken();
+    if (!etsyTokens) return res.status(400).json({ error: 'Etsy nicht verbunden' });
+    // Manual-Override: shop_id direkt im Body — fuer Faelle wo lookup blockiert ist
+    const manualShopId = req.body?.shop_id || req.query?.shop_id;
+    const manualShopName = req.body?.shop_name || req.query?.shop_name;
+    if (manualShopId) {
+      etsyTokens.shop_id = String(manualShopId);
+      etsyTokens.shop_name = manualShopName || etsyTokens.shop_name || null;
+      await etsySupaSave(etsyTokens);
+      return res.json({ ok: true, shop_id: etsyTokens.shop_id, shop_name: etsyTokens.shop_name, method: 'manual' });
+    }
+    // user_id aus access_token (Format: USER_ID.JWT_SUFFIX)
+    const userId = etsyTokens.etsy_user_id || String(etsyTokens.access_token).split('.')[0];
+    if (!userId || !/^\d+$/.test(userId)) return res.status(400).json({ error: 'user_id konnte nicht extrahiert werden', userId });
+    // /v3/application/users/{user_id}/shops liefert Shop-Info
+    const shopR = await fetchWithTimeout(`${ETSY_API}/v3/application/users/${userId}/shops`, {
+      headers: { 'x-api-key': ETSY_API_KEY, 'Authorization': `Bearer ${token}` }
+    });
+    const shopData = await shopR.json();
+    if (!shopR.ok) return res.status(502).json({ error: 'shop-fetch failed', status: shopR.status, raw: JSON.stringify(shopData).slice(0, 400) });
+    const shopId = shopData.shop_id || shopData.results?.[0]?.shop_id;
+    const shopName = shopData.shop_name || shopData.results?.[0]?.shop_name;
+    if (!shopId) return res.status(404).json({ error: 'Kein Shop gefunden fuer user_id', userId, raw: JSON.stringify(shopData).slice(0, 400) });
+    etsyTokens.shop_id = String(shopId);
+    etsyTokens.shop_name = shopName || null;
+    etsyTokens.etsy_user_id = userId;
+    await etsySupaSave(etsyTokens);
+    res.json({ ok: true, shop_id: etsyTokens.shop_id, shop_name: etsyTokens.shop_name, user_id: userId, method: 'auto' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// ─── Welcome-Email Cron Endpoint (prepared 2026-06-16) ───
+// Called by scheduled-task endocraft-welcome-email-cron (to be created) daily at 09:00 Berlin.
+// Finds leads needing email 2 (T+3d) or email 3 (T+7d), sends them, marks as sent.
+// No-op if Resend not configured.
+app.get('/api/welcome-emails/cron-tick', async (req, res) => {
+  if (!checkAdminKey(req, res)) return;
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
+  if (!resendActive) return res.json({ ok: true, skipped: true, reason: 'RESEND_API_KEY not set' });
+  const results = { email_2_sent: 0, email_3_sent: 0, errors: [] };
+  try {
+    // Email 2: T+3d, sent_at_1 set, sent_at_2 null, not unsubscribed
+    const url2 = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,unsubscribe_token,email_1_sent_at&email_1_sent_at=not.is.null&email_2_sent_at=is.null&unsubscribed_at=is.null&email_1_sent_at=lt.${encodeURIComponent(new Date(Date.now() - 3*24*60*60*1000).toISOString())}&limit=50`;
+    const r2 = await fetchWithTimeout(url2, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    if (r2.ok) {
+      const leads2 = await r2.json();
+      for (const lead of leads2) {
+        const result = await sendWelcomeEmail(2, lead);
+        if (result.ok) results.email_2_sent++;
+        else results.errors.push({ leadId: lead.id, emailNum: 2, error: result.error });
+      }
+    }
+    // Email 3: T+7d, sent_at_2 set, sent_at_3 null
+    const url3 = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,unsubscribe_token,email_2_sent_at&email_2_sent_at=not.is.null&email_3_sent_at=is.null&unsubscribed_at=is.null&email_2_sent_at=lt.${encodeURIComponent(new Date(Date.now() - 4*24*60*60*1000).toISOString())}&limit=50`;
+    const r3 = await fetchWithTimeout(url3, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    if (r3.ok) {
+      const leads3 = await r3.json();
+      for (const lead of leads3) {
+        const result = await sendWelcomeEmail(3, lead);
+        if (result.ok) results.email_3_sent++;
+        else results.errors.push({ leadId: lead.id, emailNum: 3, error: result.error });
+      }
+    }
+    res.json({ ok: true, ts: new Date().toISOString(), ...results });
+  } catch (e) {
+    console.error('[welcome-email cron-tick] failed:', e.message);
+    res.status(500).json({ ok: false, error: e.message, ...results });
+  }
+});
+
+// ─── Unsubscribe Endpoint (prepared 2026-06-16, brand-styled 2026-06-16) ───
+function unsubPage({ title, body, showRetry }) {
+  return `<!doctype html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title} · EndoCraft</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background: radial-gradient(ellipse at center top, #1a1410 0%, #0a0d14 70%, #050709 100%);
+    color: #e8d990;
+    font-family: 'Inter', -apple-system, sans-serif;
+    font-weight: 300;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0;
+    background: radial-gradient(circle at 30% 20%, rgba(212,175,55,0.04) 0%, transparent 50%),
+                radial-gradient(circle at 70% 80%, rgba(212,175,55,0.03) 0%, transparent 50%);
+    pointer-events: none;
+  }
+  .card {
+    max-width: 520px; width: 100%;
+    background: linear-gradient(180deg, rgba(20,16,12,0.85) 0%, rgba(10,10,14,0.95) 100%);
+    border: 1px solid rgba(212,175,55,0.18);
+    border-radius: 8px;
+    padding: 48px 40px 40px;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 0 1px rgba(212,175,55,0.06) inset;
+    position: relative;
+    z-index: 1;
+  }
+  .brand {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 13px;
+    letter-spacing: 0.32em;
+    color: rgba(212,175,55,0.7);
+    text-transform: uppercase;
+    margin-bottom: 24px;
+    font-weight: 500;
+  }
+  .seal {
+    width: 56px; height: 56px;
+    margin: 0 auto 28px;
+    border: 1px solid rgba(212,175,55,0.4);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    color: #d4af37;
+    position: relative;
+  }
+  .seal::before {
+    content: ""; position: absolute; inset: -6px;
+    border: 1px solid rgba(212,175,55,0.15);
+    border-radius: 50%;
+  }
+  h1 {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 500;
+    font-size: 36px;
+    letter-spacing: 0.01em;
+    color: #d4af37;
+    margin-bottom: 18px;
+    line-height: 1.2;
+  }
+  p {
+    color: rgba(232,217,144,0.78);
+    font-size: 16px;
+    margin-bottom: 14px;
+    font-weight: 300;
+  }
+  .signature {
+    margin-top: 28px;
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    font-size: 18px;
+    color: rgba(212,175,55,0.85);
+  }
+  .divider {
+    width: 56px; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(212,175,55,0.35), transparent);
+    margin: 28px auto 24px;
+  }
+  .back-link {
+    display: inline-block;
+    margin-top: 8px;
+    color: rgba(212,175,55,0.75);
+    text-decoration: none;
+    font-size: 13px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    padding: 12px 28px;
+    border: 1px solid rgba(212,175,55,0.3);
+    border-radius: 2px;
+    transition: all 0.3s ease;
+  }
+  .back-link:hover {
+    background: rgba(212,175,55,0.08);
+    border-color: rgba(212,175,55,0.6);
+    color: #d4af37;
+  }
+  .roll-high {
+    margin-top: 36px;
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 14px;
+    color: rgba(212,175,55,0.35);
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">EndoCraft</div>
+    ${body}
+    <div class="roll-high">⚔ Roll High ⚔</div>
+  </div>
+</body></html>`;
+}
+
+app.get('/unsubscribe', async (req, res) => {
+  const token = String(req.query.token || '').trim();
+  if (!token || !/^[0-9a-f-]{36}$/i.test(token)) {
+    return res.status(400).send(unsubPage({
+      title: 'Invalid Link',
+      body: `
+        <div class="seal">⚠</div>
+        <h1>Invalid Link</h1>
+        <p>This unsubscribe link is missing or malformed.</p>
+        <p style="font-size:14px;opacity:0.7">If you want to stop receiving emails, reply to any of mine and I'll remove you manually.</p>
+        <div class="divider"></div>
+        <a class="back-link" href="https://endocraft.app/">Return to EndoCraft</a>
+      `
+    }));
+  }
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).send(unsubPage({
+    title: 'Server Error',
+    body: `
+      <div class="seal">⚙</div>
+      <h1>Something Went Wrong</h1>
+      <p>Reply to any of my emails and I'll manually remove you. Won't take long.</p>
+      <div class="signature">— Marco</div>
+      <div class="divider"></div>
+      <a class="back-link" href="https://endocraft.app/">Return to EndoCraft</a>
+    `
+  }));
+  try {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads?unsubscribe_token=eq.${token}`, {
+      method: 'PATCH',
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal'
+      },
+      body: JSON.stringify({ unsubscribed_at: new Date().toISOString() })
+    });
+    if (!r.ok) {
+      return res.status(500).send(unsubPage({
+        title: 'Something Went Wrong',
+        body: `
+          <div class="seal">⚙</div>
+          <h1>Something Went Wrong</h1>
+          <p>Reply to any of my emails and I'll manually remove you. Won't take long.</p>
+          <div class="signature">— Marco</div>
+          <div class="divider"></div>
+          <a class="back-link" href="https://endocraft.app/">Return to EndoCraft</a>
+        `
+      }));
+    }
+    res.send(unsubPage({
+      title: "You're unsubscribed",
+      body: `
+        <div class="seal">✓</div>
+        <h1>You're unsubscribed.</h1>
+        <p>No more emails from EndoCraft.</p>
+        <p>No hard feelings — sometimes the inbox just gets full.</p>
+        <p style="font-size:14px;opacity:0.65;margin-top:18px">If you ever change your mind, the free pack is always at endocraft.app/free.</p>
+        <div class="signature">— Marco</div>
+        <div class="divider"></div>
+        <a class="back-link" href="https://endocraft.app/">Return to EndoCraft</a>
+      `
+    }));
+  } catch (e) {
+    res.status(500).send(unsubPage({
+      title: 'Unable to Process',
+      body: `
+        <div class="seal">⚙</div>
+        <h1>Unable to Process</h1>
+        <p>Reply to any of my emails and I'll remove you manually. Won't take long.</p>
+        <div class="signature">— Marco</div>
+        <div class="divider"></div>
+        <a class="back-link" href="https://endocraft.app/">Return to EndoCraft</a>
+      `
+    }));
+  }
+});
+
+app.listen(PORT, () => console.log(`EndoCraft API running on port ${PORT}`));
