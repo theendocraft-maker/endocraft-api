@@ -56,26 +56,18 @@ function checkAdminKey(req, res) {
   return true;
 }
 
-// ─── Resend Email-Integration (prepared 2026-06-16) ───
+// ─── Resend Email-Integration (prepared 2026-06-16, refactored 2026-06-16) ───
 // Activates only when RESEND_API_KEY is set. Until then: all email-functions are no-op.
-// Setup steps (when Marco signs up at resend.com):
-// 1. npm install resend (already in package.json)
-// 2. Set RESEND_API_KEY env in Railway
+// Uses Resend's REST API directly via fetch — no SDK dependency.
+// Setup steps:
+// 1. Set RESEND_API_KEY env in Railway
+// 2. Optionally set RESEND_FROM (default: marco@endocraft.app)
 // 3. Run supabase-migrations/008_welcome_email_columns.sql
 // 4. Verify endocraft.app DNS (SPF + DKIM via Resend dashboard)
-// 5. Deploy + scheduled-task welcome-email-cron is auto-triggered
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const RESEND_FROM = process.env.RESEND_FROM || 'Marco @ EndoCraft <hello@endocraft.app>';
-let resendClient = null;
-if (RESEND_API_KEY) {
-  try {
-    const { Resend } = require('resend');
-    resendClient = new Resend(RESEND_API_KEY);
-    console.log('[email] Resend client initialized');
-  } catch (e) {
-    console.warn('[email] Resend not installed yet — run: npm install resend');
-  }
-}
+const RESEND_FROM = process.env.RESEND_FROM || 'Marco @ EndoCraft <marco@endocraft.app>';
+const resendActive = !!RESEND_API_KEY;
+if (resendActive) console.log('[email] Resend active · sending via REST API');
 
 // Email-Templates · plain-text for high deliverability + Marco's voice
 function emailTemplate1Welcome(unsubToken) {
@@ -199,10 +191,10 @@ P.S. — If you read this all the way to here and you're NOT a DM but just curio
 Unsubscribe: https://endocraft-production.up.railway.app/unsubscribe?token=${unsubToken}`;
 }
 
-// Send a welcome-email · no-op if Resend not configured
+// Send a welcome-email via Resend REST API · no-op if Resend not configured
 async function sendWelcomeEmail(emailNumber, lead) {
-  if (!resendClient) {
-    console.log(`[email] Skipping email ${emailNumber} to ${lead.email} — Resend not configured`);
+  if (!resendActive) {
+    console.log(`[email] Skipping email ${emailNumber} to ${lead.email} — RESEND_API_KEY not set`);
     return { ok: true, skipped: true };
   }
   const subjects = {
@@ -222,12 +214,25 @@ async function sendWelcomeEmail(emailNumber, lead) {
   }
   try {
     const text = tmplFn(lead.unsubscribe_token);
-    await resendClient.emails.send({
-      from: RESEND_FROM,
-      to: [lead.email],
-      subject: subjects[emailNumber],
-      text
+    // POST to Resend REST API · https://resend.com/docs/api-reference/emails/send-email
+    const sendRes = await fetchWithTimeout('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: RESEND_FROM,
+        to: [lead.email],
+        subject: subjects[emailNumber],
+        text
+      })
     });
+    if (!sendRes.ok) {
+      const errBody = await sendRes.text().catch(() => '');
+      console.error(`[email] Resend API failed (${sendRes.status}):`, errBody.slice(0, 300));
+      return { ok: false, error: `Resend HTTP ${sendRes.status}` };
+    }
     // Mark as sent in Supabase
     if (SUPABASE_URL && SUPABASE_KEY) {
       const patchUrl = `${SUPABASE_URL}/rest/v1/free_pack_leads?id=eq.${lead.id}`;
@@ -242,6 +247,7 @@ async function sendWelcomeEmail(emailNumber, lead) {
         body: JSON.stringify({ [`email_${emailNumber}_sent_at`]: new Date().toISOString() })
       });
     }
+    console.log(`[email] Sent email ${emailNumber} to ${lead.email}`);
     return { ok: true };
   } catch (e) {
     console.error(`[email] Send failed: email ${emailNumber} to ${lead.email}`, e.message);
@@ -3034,278 +3040,4 @@ app.get('/api/free-pack/leads', async (req, res) => {
     if (!Array.isArray(data)) return res.status(502).json({ error: 'Supabase invalid response', raw: data });
     const bySource = {};
     data.forEach(d => { bySource[d.source || 'direct'] = (bySource[d.source || 'direct'] || 0) + 1; });
-    res.json({ ok: true, total: data.length, bySource, leads: data });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ETSY LISTINGS · LIST + UPDATE (für Bulk-Update-Tool)
-// ═══════════════════════════════════════════════════════════════════════════
-app.get('/api/etsy/my-listings', async (req, res) => {
-  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
-  try {
-    await etsyGetToken();
-    if (!etsyTokens.shop_id) return res.status(400).json({ error: 'Keine shop_id' });
-    const state = String(req.query.state || 'active');
-    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings?state=${state}&limit=100&includes=Images`, {
-      method: 'GET'
-    });
-    const data = await r.json();
-    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
-    const listings = (data.results || []).map(l => ({
-      listing_id: l.listing_id,
-      title: l.title,
-      description: l.description,
-      price: l.price?.amount ? (l.price.amount / l.price.divisor) : null,
-      currency: l.price?.currency_code,
-      state: l.state,
-      url: l.url,
-      tags: l.tags || [],
-      taxonomy_id: l.taxonomy_id,
-      created: l.created_timestamp,
-      updated: l.last_modified_timestamp,
-      views: l.views || 0,
-      num_favorers: l.num_favorers || 0,
-      quantity: l.quantity || 0,
-      thumb: l.images?.[0]?.url_170x135 || null
-    }));
-    res.json({ ok: true, count: listings.length, listings });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// Etsy receipts (sales) for cockpit
-app.get('/api/etsy/receipts', async (req, res) => {
-  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
-  if (!checkAdminKey(req, res)) return;
-  try {
-    await etsyGetToken();
-    if (!etsyTokens.shop_id) return res.status(400).json({ error: 'Keine shop_id' });
-    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/receipts?limit=100`, { method: 'GET' });
-    const data = await r.json();
-    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
-    const receipts = (data.results || []).map(r => ({
-      receipt_id: r.receipt_id,
-      created: r.create_timestamp,
-      buyer_name: r.name || null,
-      total: r.grandtotal?.amount ? (r.grandtotal.amount / r.grandtotal.divisor) : null,
-      currency: r.grandtotal?.currency_code || 'EUR',
-      status: r.status,
-      is_paid: !!r.is_paid,
-      is_shipped: !!r.is_shipped,
-      transactions: (r.transactions || []).map(t => ({
-        listing_id: t.listing_id,
-        title: t.title,
-        quantity: t.quantity,
-        price: t.price?.amount ? (t.price.amount / t.price.divisor) : null
-      }))
-    }));
-    const totalRevenue = receipts.reduce((s, r) => s + (r.total || 0), 0);
-    res.json({ ok: true, count: receipts.length, totalRevenue, receipts });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// Cockpit: aggregated business overview
-app.get('/api/cockpit/overview', async (req, res) => {
-  if (!checkAdminKey(req, res)) return;
-  const result = { ok: true, ts: new Date().toISOString() };
-
-  // Leads
-  try {
-    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=email,source,utm,created_at&order=created_at.desc&limit=2000`, {
-      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
-    });
-    const leads = await r.json();
-    if (Array.isArray(leads)) {
-      const bySource = {};
-      leads.forEach(l => { bySource[l.source || 'direct'] = (bySource[l.source || 'direct'] || 0) + 1; });
-      // last 7 days
-      const cutoff7d = Date.now() - 7 * 86400 * 1000;
-      const last7d = leads.filter(l => new Date(l.created_at).getTime() > cutoff7d).length;
-      result.leads = { total: leads.length, bySource, last7d, recent: leads.slice(0, 5) };
-    }
-  } catch (e) { result.leads = { error: e.message }; }
-
-  // Etsy listings
-  try {
-    await etsyGetToken();
-    if (etsyTokens.shop_id) {
-      const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings?state=active&limit=100&includes=Images`, { method: 'GET' });
-      const data = await r.json();
-      const listings = (data.results || []).map(l => ({
-        listing_id: l.listing_id,
-        title: l.title,
-        price: l.price?.amount ? (l.price.amount / l.price.divisor) : null,
-        currency: l.price?.currency_code,
-        url: l.url,
-        views: l.views || 0,
-        num_favorers: l.num_favorers || 0,
-        quantity: l.quantity || 0,
-        thumb: l.images?.[0]?.url_170x135 || null
-      }));
-      const totalViews = listings.reduce((s, l) => s + l.views, 0);
-      const totalFavorites = listings.reduce((s, l) => s + l.num_favorers, 0);
-      result.etsy = {
-        listingCount: listings.length,
-        totalViews,
-        totalFavorites,
-        listings: listings.sort((a, b) => b.views - a.views)
-      };
-    } else {
-      result.etsy = { error: 'shop_id missing — visit /api/etsy/fix-shop-info' };
-    }
-  } catch (e) { result.etsy = { error: e.message }; }
-
-  // Etsy receipts
-  try {
-    if (etsyTokens.shop_id) {
-      const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/receipts?limit=100`, { method: 'GET' });
-      const data = await r.json();
-      const receipts = (data.results || []).map(r => ({
-        receipt_id: r.receipt_id,
-        created: r.create_timestamp,
-        buyer_name: r.name || null,
-        total: r.grandtotal?.amount ? (r.grandtotal.amount / r.grandtotal.divisor) : null,
-        currency: r.grandtotal?.currency_code || 'EUR',
-        status: r.status,
-        transactions: (r.transactions || []).map(t => ({ listing_id: t.listing_id, title: t.title }))
-      }));
-      const totalRevenue = receipts.reduce((s, r) => s + (r.total || 0), 0);
-      result.sales = { count: receipts.length, totalRevenue, recent: receipts.slice(0, 10) };
-    }
-  } catch (e) { result.sales = { error: e.message }; }
-
-  res.json(result);
-});
-
-app.patch('/api/etsy/listing/:listingId', async (req, res) => {
-  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
-  const { title, description, tags } = req.body || {};
-  if (!title && !description && !tags) return res.status(400).json({ error: 'title|description|tags required' });
-  try {
-    await etsyGetToken();
-    const body = new URLSearchParams();
-    if (title) body.set('title', String(title).slice(0, 140));
-    if (description) body.set('description', String(description));
-    if (Array.isArray(tags) && tags.length) body.set('tags', tags.slice(0, 13).map(t => String(t).slice(0, 20)).join(','));
-    const r = await etsyFetch(`/v3/application/shops/${etsyTokens.shop_id}/listings/${req.params.listingId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body
-    });
-    const data = await r.json();
-    if (!r.ok) return res.status(502).json({ error: data?.error || JSON.stringify(data).slice(0, 400) });
-    res.json({ ok: true, listing_id: data.listing_id, state: data.state });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ETSY · Manual Shop-Info-Fix (fuer Faelle wo /users/me kein shop_id liefert)
-// ═══════════════════════════════════════════════════════════════════════════
-app.post('/api/etsy/fix-shop-info', async (req, res) => {
-  if (!ETSY_KEYSTRING) return res.status(500).json({ error: 'ETSY_KEYSTRING fehlt' });
-  try {
-    const token = await etsyGetToken();
-    if (!etsyTokens) return res.status(400).json({ error: 'Etsy nicht verbunden' });
-    // Manual-Override: shop_id direkt im Body — fuer Faelle wo lookup blockiert ist
-    const manualShopId = req.body?.shop_id || req.query?.shop_id;
-    const manualShopName = req.body?.shop_name || req.query?.shop_name;
-    if (manualShopId) {
-      etsyTokens.shop_id = String(manualShopId);
-      etsyTokens.shop_name = manualShopName || etsyTokens.shop_name || null;
-      await etsySupaSave(etsyTokens);
-      return res.json({ ok: true, shop_id: etsyTokens.shop_id, shop_name: etsyTokens.shop_name, method: 'manual' });
-    }
-    // user_id aus access_token (Format: USER_ID.JWT_SUFFIX)
-    const userId = etsyTokens.etsy_user_id || String(etsyTokens.access_token).split('.')[0];
-    if (!userId || !/^\d+$/.test(userId)) return res.status(400).json({ error: 'user_id konnte nicht extrahiert werden', userId });
-    // /v3/application/users/{user_id}/shops liefert Shop-Info
-    const shopR = await fetchWithTimeout(`${ETSY_API}/v3/application/users/${userId}/shops`, {
-      headers: { 'x-api-key': ETSY_API_KEY, 'Authorization': `Bearer ${token}` }
-    });
-    const shopData = await shopR.json();
-    if (!shopR.ok) return res.status(502).json({ error: 'shop-fetch failed', status: shopR.status, raw: JSON.stringify(shopData).slice(0, 400) });
-    const shopId = shopData.shop_id || shopData.results?.[0]?.shop_id;
-    const shopName = shopData.shop_name || shopData.results?.[0]?.shop_name;
-    if (!shopId) return res.status(404).json({ error: 'Kein Shop gefunden fuer user_id', userId, raw: JSON.stringify(shopData).slice(0, 400) });
-    etsyTokens.shop_id = String(shopId);
-    etsyTokens.shop_name = shopName || null;
-    etsyTokens.etsy_user_id = userId;
-    await etsySupaSave(etsyTokens);
-    res.json({ ok: true, shop_id: etsyTokens.shop_id, shop_name: etsyTokens.shop_name, user_id: userId, method: 'auto' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-
-// ─── Welcome-Email Cron Endpoint (prepared 2026-06-16) ───
-// Called by scheduled-task endocraft-welcome-email-cron (to be created) daily at 09:00 Berlin.
-// Finds leads needing email 2 (T+3d) or email 3 (T+7d), sends them, marks as sent.
-// No-op if Resend not configured.
-app.get('/api/welcome-emails/cron-tick', async (req, res) => {
-  if (!checkAdminKey(req, res)) return;
-  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
-  if (!resendClient) return res.json({ ok: true, skipped: true, reason: 'Resend not configured' });
-  const results = { email_2_sent: 0, email_3_sent: 0, errors: [] };
-  try {
-    // Email 2: T+3d, sent_at_1 set, sent_at_2 null, not unsubscribed
-    const url2 = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,unsubscribe_token,email_1_sent_at&email_1_sent_at=not.is.null&email_2_sent_at=is.null&unsubscribed_at=is.null&email_1_sent_at=lt.${encodeURIComponent(new Date(Date.now() - 3*24*60*60*1000).toISOString())}&limit=50`;
-    const r2 = await fetchWithTimeout(url2, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
-    if (r2.ok) {
-      const leads2 = await r2.json();
-      for (const lead of leads2) {
-        const result = await sendWelcomeEmail(2, lead);
-        if (result.ok) results.email_2_sent++;
-        else results.errors.push({ leadId: lead.id, emailNum: 2, error: result.error });
-      }
-    }
-    // Email 3: T+7d, sent_at_2 set, sent_at_3 null
-    const url3 = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,unsubscribe_token,email_2_sent_at&email_2_sent_at=not.is.null&email_3_sent_at=is.null&unsubscribed_at=is.null&email_2_sent_at=lt.${encodeURIComponent(new Date(Date.now() - 4*24*60*60*1000).toISOString())}&limit=50`;
-    const r3 = await fetchWithTimeout(url3, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
-    if (r3.ok) {
-      const leads3 = await r3.json();
-      for (const lead of leads3) {
-        const result = await sendWelcomeEmail(3, lead);
-        if (result.ok) results.email_3_sent++;
-        else results.errors.push({ leadId: lead.id, emailNum: 3, error: result.error });
-      }
-    }
-    res.json({ ok: true, ts: new Date().toISOString(), ...results });
-  } catch (e) {
-    console.error('[welcome-email cron-tick] failed:', e.message);
-    res.status(500).json({ ok: false, error: e.message, ...results });
-  }
-});
-
-// ─── Unsubscribe Endpoint (prepared 2026-06-16) ───
-app.get('/unsubscribe', async (req, res) => {
-  const token = String(req.query.token || '').trim();
-  if (!token || !/^[0-9a-f-]{36}$/i.test(token)) {
-    return res.status(400).send('<html><body style="font-family:sans-serif;text-align:center;padding:50px;color:#333">Invalid unsubscribe link. <br><br><a href="/">Back to EndoCraft</a></body></html>');
-  }
-  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).send('Server config error');
-  try {
-    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads?unsubscribe_token=eq.${token}`, {
-      method: 'PATCH',
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-        'Prefer': 'return=minimal'
-      },
-      body: JSON.stringify({ unsubscribed_at: new Date().toISOString() })
-    });
-    if (!r.ok) {
-      return res.status(500).send('<html><body style="font-family:sans-serif;text-align:center;padding:50px;color:#333">Something went wrong. Please reply to any email and I\'ll manually remove you. — Marco</body></html>');
-    }
-    res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:50px;color:#333;background:#0a0e16;color:#e8d990">
-      <h1 style="color:#d4af37">You're unsubscribed.</h1>
-      <p>No more emails from EndoCraft. No hard feelings.</p>
-      <p>If you change your mind, just hit endocraft.app/free again.</p>
-      <p>— Marco</p>
-      <p><a style="color:#d4af37;" href="https://endocraft.app/">Back to EndoCraft</a></p>
-    </body></html>`);
-  } catch (e) {
-    res.status(500).send('<html><body style="font-family:sans-serif;text-align:center;padding:50px">Unable to process. Reply to any email and I\'ll remove you manually. — Marco</body></html>');
-  }
-});
-
-app.listen(PORT, () => console.log(`EndoCraft API running on port ${PORT}`));
+    res.json({ ok: true, total: data.length,
