@@ -2640,7 +2640,7 @@ Return ONLY JSON, no markdown: {"hooks":["...","...","..."]}`;
 const ETSY_KEYSTRING = process.env.ETSY_KEYSTRING;
 // Personal-Access-Apps: Etsy verlangt fuer data calls (shops/users) den Shared Secret im x-api-key Header.
 // Keystring (client_id) wird nur fuer OAuth (connect/refresh) genutzt. Fallback auf Keystring fuer Backwards-Compat.
-const ETSY_API_KEY = process.env.ETSY_KEYSTRING || process.env.ETSY_API_KEY;
+const ETSY_API_KEY = process.env.ETSY_API_KEY || process.env.ETSY_SHARED_SECRET || process.env.ETSY_KEYSTRING;
 const ETSY_REDIRECT_URI = process.env.ETSY_REDIRECT_URI || 'https://endocraft-production.up.railway.app/api/etsy/callback';
 const ETSY_SCOPES = 'listings_r listings_w shops_r';
 const ETSY_API = 'https://openapi.etsy.com';
