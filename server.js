@@ -2627,6 +2627,166 @@ Return ONLY JSON, no markdown: {"hooks":["...","...","..."]}`;
 
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// TIKTOK CONTENT POSTING API — Reels automatisch in die TikTok-Entwürfe ("Inbox")
+//
+// Flow: /api/tiktok/connect (OAuth v2) → /api/tiktok/callback speichert Tokens (Supabase tiktok_tokens)
+//       → /api/tiktok/post-draft {video:"reel1-curse-of-strahd"} → Inbox-Upload (FILE_UPLOAD)
+//       → Video erscheint als Entwurf in Marcos TikTok-App (Push), er ergänzt Caption + postet.
+//
+// Railway-ENV: TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET (TIKTOK_REDIRECT_URI optional)
+// Scope: user.info.basic,video.upload  → Inbox/Draft braucht KEIN App-Audit (Direct-Post später).
+// Reels öffentlich gehostet unter https://endocraft.app/reels/<name>.mp4 (GitHub Pages).
+// SQL: supabase-migrations/009_tiktok_tokens.sql
+// ═══════════════════════════════════════════════════════════════════════════
+const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY;
+const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
+const TIKTOK_REDIRECT_URI = process.env.TIKTOK_REDIRECT_URI || 'https://endocraft-production.up.railway.app/api/tiktok/callback';
+const TIKTOK_SCOPES = 'user.info.basic,video.upload';
+const TIKTOK_API = 'https://open.tiktokapis.com';
+const REELS_BASE = process.env.REELS_BASE || 'https://endocraft.app/reels';
+const tiktokOAuthStates = new Map();
+let tiktokTokens = null;
+
+async function tiktokSupaLoad() {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
+  try {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/tiktok_tokens?id=eq.1&select=*&limit=1`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    const data = await r.json();
+    if (r.ok && Array.isArray(data) && data.length) return data[0];
+  } catch (e) { console.warn('[tiktok] supa load failed', e.message); }
+  return null;
+}
+async function tiktokSupaSave(t) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+  try {
+    await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/tiktok_tokens?on_conflict=id`, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates'
+      },
+      body: JSON.stringify({ id: 1, ...t, updated_at: new Date().toISOString() })
+    });
+  } catch (e) { console.warn('[tiktok] supa save failed', e.message); }
+}
+async function tiktokGetToken() {
+  if (!tiktokTokens) tiktokTokens = await tiktokSupaLoad();
+  if (!tiktokTokens || !tiktokTokens.refresh_token) throw new Error('TikTok nicht verbunden — erst /api/tiktok/connect durchlaufen');
+  const expiresAt = new Date(tiktokTokens.expires_at || 0).getTime();
+  if (Date.now() < expiresAt - 120000) return tiktokTokens.access_token;
+  const body = new URLSearchParams({
+    client_key: TIKTOK_CLIENT_KEY, client_secret: TIKTOK_CLIENT_SECRET,
+    grant_type: 'refresh_token', refresh_token: tiktokTokens.refresh_token
+  });
+  const r = await fetchWithTimeout(`${TIKTOK_API}/v2/oauth/token/`, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
+  });
+  const data = await r.json();
+  if (!r.ok || data.error) throw new Error('TikTok token refresh failed: ' + (data.error_description || data.error || r.status));
+  tiktokTokens = {
+    ...tiktokTokens,
+    access_token: data.access_token,
+    refresh_token: data.refresh_token || tiktokTokens.refresh_token,
+    expires_at: new Date(Date.now() + (data.expires_in || 86400) * 1000).toISOString(),
+    refresh_expires_at: new Date(Date.now() + (data.refresh_expires_in || 31536000) * 1000).toISOString(),
+    open_id: data.open_id || tiktokTokens.open_id, scope: data.scope || tiktokTokens.scope
+  };
+  await tiktokSupaSave(tiktokTokens);
+  return tiktokTokens.access_token;
+}
+
+app.get('/api/tiktok/connect', (req, res) => {
+  if (!TIKTOK_CLIENT_KEY) return res.status(500).send('TIKTOK_CLIENT_KEY fehlt in den Railway-Variablen. Erst App auf developers.tiktok.com registrieren.');
+  const state = crypto.randomBytes(16).toString('hex');
+  tiktokOAuthStates.set(state, { created: Date.now() });
+  for (const [k, v] of tiktokOAuthStates) if (Date.now() - v.created > 600000) tiktokOAuthStates.delete(k);
+  const url = 'https://www.tiktok.com/v2/auth/authorize/?' + new URLSearchParams({
+    client_key: TIKTOK_CLIENT_KEY, scope: TIKTOK_SCOPES, response_type: 'code',
+    redirect_uri: TIKTOK_REDIRECT_URI, state
+  });
+  res.redirect(url);
+});
+
+app.get('/api/tiktok/callback', async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+  const page = (title, body, ok) => res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title><style>body{background:#10131c;color:#e9e4d6;font-family:Georgia,serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}div{text-align:center;max-width:480px;padding:40px;border:1px solid ${ok ? '#7bbd8f' : '#d98a8a'};border-radius:14px}h1{color:${ok ? '#d8b46a' : '#d98a8a'};font-size:22px}p{color:#9aa0b3;line-height:1.6}</style></head><body><div><h1>${title}</h1><p>${body}</p></div></body></html>`);
+  if (error) return page('TikTok-Verbindung abgelehnt', String(error_description || error), false);
+  if (!tiktokOAuthStates.get(state)) return page('Ungültiger State', 'OAuth-State unbekannt oder abgelaufen. Connect-Flow neu starten.', false);
+  tiktokOAuthStates.delete(state);
+  try {
+    const body = new URLSearchParams({
+      client_key: TIKTOK_CLIENT_KEY, client_secret: TIKTOK_CLIENT_SECRET,
+      code, grant_type: 'authorization_code', redirect_uri: TIKTOK_REDIRECT_URI
+    });
+    const r = await fetchWithTimeout(`${TIKTOK_API}/v2/oauth/token/`, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) return page('Token-Tausch fehlgeschlagen', data.error_description || data.error || ('HTTP ' + r.status), false);
+    tiktokTokens = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at: new Date(Date.now() + (data.expires_in || 86400) * 1000).toISOString(),
+      refresh_expires_at: new Date(Date.now() + (data.refresh_expires_in || 31536000) * 1000).toISOString(),
+      open_id: data.open_id, scope: data.scope
+    };
+    await tiktokSupaSave(tiktokTokens);
+    return page('TikTok verbunden', `Scopes: <b style="color:#d8b46a">${tiktokTokens.scope || TIKTOK_SCOPES}</b><br><br>Fenster schliessen. Reels koennen jetzt als Entwurf in die TikTok-App geschoben werden.`, true);
+  } catch (e) {
+    return page('Fehler', e.message, false);
+  }
+});
+
+app.get('/api/tiktok/status', async (req, res) => {
+  if (!TIKTOK_CLIENT_KEY) return res.json({ connected: false, keyConfigured: false });
+  try {
+    if (!tiktokTokens) tiktokTokens = await tiktokSupaLoad();
+    if (!tiktokTokens || !tiktokTokens.refresh_token) return res.json({ connected: false, keyConfigured: true });
+    res.json({ connected: true, keyConfigured: true, open_id: tiktokTokens.open_id || null, scope: tiktokTokens.scope || null, expires_at: tiktokTokens.expires_at });
+  } catch (e) { res.json({ connected: false, keyConfigured: true, error: e.message }); }
+});
+
+app.post('/api/tiktok/post-draft', async (req, res) => {
+  if (!TIKTOK_CLIENT_KEY) return res.status(500).json({ error: 'TIKTOK_CLIENT_KEY fehlt' });
+  const name = String((req.body && req.body.video) || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!name) return res.status(400).json({ error: 'video name required' });
+  try {
+    const token = await tiktokGetToken();
+    const vidUrl = `${REELS_BASE}/${name}.mp4`;
+    const vr = await fetchWithTimeout(vidUrl);
+    if (!vr.ok) return res.status(404).json({ error: `Reel nicht erreichbar: ${vidUrl} (HTTP ${vr.status})` });
+    const buf = Buffer.from(await vr.arrayBuffer());
+    const size = buf.length;
+    const initR = await fetchWithTimeout(`${TIKTOK_API}/v2/post/publish/inbox/video/init/`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json; charset=UTF-8' },
+      body: JSON.stringify({ source_info: { source: 'FILE_UPLOAD', video_size: size, chunk_size: size, total_chunk_count: 1 } })
+    });
+    const init = await initR.json();
+    if (!initR.ok || (init.error && init.error.code !== 'ok')) {
+      return res.status(502).json({ error: 'init failed', detail: init.error || init });
+    }
+    const { publish_id, upload_url } = init.data || {};
+    if (!upload_url) return res.status(502).json({ error: 'no upload_url', detail: init });
+    const putR = await fetchWithTimeout(upload_url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'video/mp4', 'Content-Range': `bytes 0-${size - 1}/${size}`, 'Content-Length': String(size) },
+      body: buf
+    });
+    if (!putR.ok) {
+      const t = await putR.text().catch(() => '');
+      return res.status(502).json({ error: 'upload PUT failed', status: putR.status, detail: t.slice(0, 300) });
+    }
+    return res.json({ ok: true, publish_id, video: name, note: 'Liegt jetzt als Entwurf in der TikTok-App (Push) - dort Caption ergaenzen + posten.' });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+
 // ETSY OPEN API v3 — Vollautomatische Draft-Listing-Erstellung
 //
 // Flow: /api/etsy/connect (OAuth2+PKCE) → Callback speichert Tokens (Supabase)
