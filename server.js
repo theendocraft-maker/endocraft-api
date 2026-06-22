@@ -1480,6 +1480,92 @@ app.get('/api/image/proxy', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// VIDEO GENERATION — AIMLAPI (Kling image-to-video). Async: create task → poll.
+// Key stays server-side (AIML_API_KEY in Railway). Mirrors the /api/image flow.
+//   POST /api/video         { prompt, image_url, model?, duration?, negative_prompt?, cfg_scale? } -> { id, status }
+//   GET  /api/video/status?id=... -> { id, status, url, error, credits_used }
+//   GET  /api/video/proxy?url=...  -> streams the finished mp4 same-origin
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/video', async (req, res) => {
+  try {
+    const { prompt, image_url, model = 'kling-video/v2.1/standard/image-to-video', duration = 5, negative_prompt, cfg_scale } = req.body || {};
+    if (!image_url && !prompt) return res.status(400).json({ error: 'image_url or prompt required' });
+    const body = { model };
+    if (prompt) body.prompt = prompt;
+    if (image_url) body.image_url = image_url;
+    if (duration) body.duration = String(duration);
+    if (negative_prompt) body.negative_prompt = negative_prompt;
+    if (cfg_scale != null) body.cfg_scale = cfg_scale;
+    const r = await fetchWithTimeout('https://api.aimlapi.com/v2/video/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AIML_KEY}` },
+      body: JSON.stringify(body)
+    }, 60000);
+    const data = await r.json().catch(() => ({}));
+    console.log('[video] create:', JSON.stringify(data).substring(0, 300));
+    if (!r.ok || data.error) return res.status(r.status >= 400 ? r.status : 500).json({ error: data.error || ('HTTP ' + r.status), raw: data });
+    return res.json({ id: data.id, status: data.status });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/video/status', async (req, res) => {
+  try {
+    const id = req.query.id;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const r = await fetchWithTimeout('https://api.aimlapi.com/v2/video/generations?generation_id=' + encodeURIComponent(String(id)), {
+      headers: { 'Authorization': `Bearer ${AIML_KEY}` }
+    }, 60000);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json({ error: data.error || ('HTTP ' + r.status), raw: data });
+    return res.json({
+      id: data.id,
+      status: data.status,
+      url: (data.video && data.video.url) || null,
+      error: data.error || null,
+      credits_used: (data.meta && data.meta.usage && data.meta.usage.credits_used) ?? null
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const VIDEO_PROXY_ALLOWED_HOSTS = [
+  'aimlapi.com', 'cdn.aimlapi.com', 'api.aimlapi.com',
+  'klingai.com', 'kling.com',
+  'replicate.delivery', 'fal.media', 'fal.ai',
+  'storage.googleapis.com', 'amazonaws.com', 'blob.core.windows.net',
+  'bytedance.com', 'volccdn.com', 'volces.com'
+];
+app.get('/api/video/proxy', async (req, res) => {
+  try {
+    const raw = req.query.url;
+    if (!raw || typeof raw !== 'string') return res.status(400).json({ error: 'url required' });
+    let u;
+    try { u = new URL(raw); } catch { return res.status(400).json({ error: 'invalid url' }); }
+    if (u.protocol !== 'https:') return res.status(400).json({ error: 'https only' });
+    const host = u.hostname.toLowerCase();
+    if (/^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.|::1|metadata\.)/.test(host) || host.endsWith('.internal')) return res.status(403).json({ error: 'host not allowed' });
+    const ok = VIDEO_PROXY_ALLOWED_HOSTS.some(suf => host === suf || host.endsWith('.' + suf));
+    if (!ok) { console.warn('[video proxy] blocked host:', host); return res.status(403).json({ error: 'host not allow-listed', host }); }
+    const upstream = await fetchWithTimeout(u.toString(), { redirect: 'follow' }, 120000);
+    if (!upstream.ok) return res.status(502).json({ error: 'upstream ' + upstream.status });
+    const ctype = upstream.headers.get('content-type') || 'video/mp4';
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Content-Type', ctype);
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.set('Content-Disposition', 'attachment');
+    return res.send(buf);
+  } catch (err) {
+    console.error('[video proxy] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // Email subscribe — writes to Supabase subscribers table
 app.post('/api/subscribe', async (req, res) => {
   try {
