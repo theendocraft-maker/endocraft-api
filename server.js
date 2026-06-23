@@ -2888,7 +2888,7 @@ const ETSY_KEYSTRING = process.env.ETSY_KEYSTRING;
 // Keystring (client_id) wird nur fuer OAuth (connect/refresh) genutzt. Fallback auf Keystring fuer Backwards-Compat.
 const ETSY_API_KEY = process.env.ETSY_API_KEY || process.env.ETSY_SHARED_SECRET || process.env.ETSY_KEYSTRING;
 const ETSY_REDIRECT_URI = process.env.ETSY_REDIRECT_URI || 'https://endocraft-production.up.railway.app/api/etsy/callback';
-const ETSY_SCOPES = 'listings_r listings_w shops_r';
+const ETSY_SCOPES = 'listings_r listings_w shops_r transactions_r';
 const ETSY_API = 'https://openapi.etsy.com';
 const etsyOAuthStates = new Map(); // state → { verifier, created } (10 Min TTL)
 let etsyTokens = null;             // In-Memory-Cache { access_token, refresh_token, expires_at, shop_id, shop_name, etsy_user_id }
