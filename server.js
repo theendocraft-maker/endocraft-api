@@ -1397,6 +1397,95 @@ app.post('/api/image', async (req, res) => {
   }
 });
 
+// ===== EndoCraft Studio: geführte Premium-Generierung (per-Typ-Rezept + Claude-Veredelung + Varianten) =====
+const STUDIO_RECIPES = {
+  npc: {
+    size: { width: 1800, height: 2400 },
+    style: 'cinematic fantasy character portrait photography, photorealistic, dramatic chiaroscuro studio lighting, sharp focus on the face and eyes, shallow depth of field, period-accurate medieval-fantasy attire, hyperdetailed skin and fabric texture, painterly D&D 5e cover-art mood',
+    neg: 'plain background, deformed hands, extra fingers, anime, cartoon, blurry, modern clothing, embedded text, watermark'
+  },
+  monster: {
+    size: { width: 2400, height: 1800 },
+    style: 'cinematic creature photography, a single menacing fantasy monster within its natural lair, atmospheric volumetric light, dramatic rim lighting, mouth closed, powerful clear silhouette, hyperdetailed scales hide and fur, photorealistic, overwhelming sense of dread and scale',
+    neg: 'open roaring mouth, human face focus, cartoon, blurry, extra limbs, motion blur, embedded text, watermark'
+  },
+  location: {
+    size: { width: 2880, height: 1620 },
+    style: 'cinematic establishing shot, wide empty atmospheric fantasy environment, volumetric god rays, rich depth and mood, golden-hour or torchlit ambience, hyperdetailed architecture and landscape, photorealistic, painterly concept-art tone',
+    neg: 'crowd of people in foreground, cartoon, blurry, flat lighting, embedded text, watermark'
+  },
+  item: {
+    size: { width: 1800, height: 2400 },
+    style: 'still-life product photography of a single fantasy hero object, dramatic single-source light, dark moody background, hyperdetailed material and wear such as aged metal cracked leather and parchment, photorealistic, museum-quality, shallow depth of field',
+    neg: 'hands, cluttered scene, cartoon, blurry, embedded text, watermark'
+  }
+};
+const STUDIO_NUANCE = [
+  ', three-quarter view, warm key light',
+  ', alternative composition, cool rim light',
+  ', slightly different angle, dramatic backlight',
+  ', subtle variation, soft directional fill'
+];
+function studioSanitize(s) {
+  return String(s || '').slice(0, 400)
+    .replace(/\b(no|without|avoid|don'?t|never)\s+[\w-]+/gi, ' ')
+    .replace(/\b(text|words|letters|caption|captions|title|logo|watermark|signature)\b/gi, ' ')
+    .replace(/\s{2,}/g, ' ').trim();
+}
+async function studioEnrich(type, subject) {
+  if (!ANTHROPIC_KEY) return null;
+  const recipe = STUDIO_RECIPES[type] || STUDIO_RECIPES.npc;
+  const system = `You are EndoCraft's image-prompt engineer. Turn the user's short idea into ONE vivid prompt for a ${type} rendered in EndoCraft's signature look: ${recipe.style}.
+Hard rules: describe exactly ONE subject; lead with concrete visual detail (pose, material, lighting, mood, era); grounded period-accurate medieval-fantasy; 40-70 words; do NOT write any meta words, do NOT use "no"/"without"/negations, do NOT request any text/letters/logos in the image. Output ONLY the final prompt text, nothing else.`;
+  try {
+    const r = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 320, system, messages: [{ role: 'user', content: String(subject || '').slice(0, 400) }] })
+    }, 20000);
+    const d = await r.json();
+    const txt = d && d.content && d.content[0] && d.content[0].text;
+    return txt ? txt.trim() : null;
+  } catch (e) { return null; }
+}
+async function studioGenerateOne(prompt, size) {
+  let w = size.width, h = size.height;
+  const MIN_PX = 3686400;
+  if (w * h < MIN_PX) { const s = Math.sqrt(MIN_PX / (w * h)); w = Math.ceil(w * s); h = Math.ceil(h * s); }
+  const body = { model: 'bytedance/seedream-4-5', prompt, image_size: { width: Math.max(w, 1440), height: Math.max(h, 1440) } };
+  const r = await fetchWithTimeout('https://api.aimlapi.com/v1/images/generations', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AIML_KEY}` }, body: JSON.stringify(body)
+  }, 90000);
+  const d = await r.json();
+  if (d.error) throw new Error(typeof d.error === 'string' ? d.error : JSON.stringify(d.error));
+  const url = (d.data && d.data[0] && d.data[0].url) || (d.images && d.images[0] && d.images[0].url) || (Array.isArray(d.output) ? d.output[0] : d.output);
+  if (!url) throw new Error('No image in response');
+  return url;
+}
+app.post('/api/studio-image', async (req, res) => {
+  try {
+    const { type = 'npc', subject, variants = 3 } = req.body || {};
+    if (!subject || !String(subject).trim()) return res.status(400).json({ error: 'subject required' });
+    const t = STUDIO_RECIPES[type] ? type : 'npc';
+    const recipe = STUDIO_RECIPES[t];
+    const clean = studioSanitize(subject);
+    if (!clean) return res.status(400).json({ error: 'please describe your idea in a few words' });
+    let core = await studioEnrich(t, clean);
+    if (!core) core = `${clean}, ${recipe.style}`;
+    const n = Math.max(1, Math.min(4, parseInt(variants, 10) || 3));
+    const jobs = Array.from({ length: n }, (_, i) =>
+      studioGenerateOne(`${core}. ${recipe.style}. Negative: ${recipe.neg}${STUDIO_NUANCE[i % STUDIO_NUANCE.length]}`, recipe.size));
+    const settled = await Promise.allSettled(jobs);
+    const urls = settled.filter(s => s.status === 'fulfilled').map(s => s.value);
+    if (urls.length === 0) {
+      const reason = (settled.find(s => s.status === 'rejected') || {}).reason;
+      const msg = (reason && reason.message) || 'generation failed';
+      return res.status(502).json({ error: msg });
+    }
+    res.json({ urls, type: t });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/image/fast', async (req, res) => {
   try {
     const { prompt } = req.body;
