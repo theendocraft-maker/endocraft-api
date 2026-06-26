@@ -1398,26 +1398,24 @@ app.post('/api/image', async (req, res) => {
 });
 
 // ===== EndoCraft Studio: geführte Premium-Generierung (per-Typ-Rezept + Claude-Veredelung + Varianten) =====
+// Canonical EndoCraft style suffix — identical to the hand-crafted prompts (feedback_endocraft_bildstil)
+const STUDIO_SUFFIX = 'cinematic fantasy, photorealistic, sharp focus, professional photography, 8K resolution, shallow depth of field, no text, no watermark, no blur, no deformed hands, no extra limbs';
 const STUDIO_RECIPES = {
   npc: {
     size: { width: 1800, height: 2400 },
-    style: 'cinematic fantasy character portrait photography, photorealistic, dramatic chiaroscuro studio lighting, sharp focus on the face and eyes, shallow depth of field, period-accurate medieval-fantasy attire, hyperdetailed skin and fabric texture, painterly D&D 5e cover-art mood',
-    neg: 'plain background, deformed hands, extra fingers, anime, cartoon, blurry, modern clothing, embedded text, watermark'
+    style: 'dramatic cinematic character portrait of a single figure, chest-up to head-and-shoulders composition, strong directional rim lighting and warm candlelight, deep shadows, drifting dust, authentic imperfect details such as scars and worn gear, period-accurate medieval-fantasy'
   },
   monster: {
     size: { width: 2400, height: 1800 },
-    style: 'cinematic creature photography, a single menacing fantasy monster within its natural lair, atmospheric volumetric light, dramatic rim lighting, mouth closed, powerful clear silhouette, hyperdetailed scales hide and fur, photorealistic, overwhelming sense of dread and scale',
-    neg: 'open roaring mouth, human face focus, cartoon, blurry, extra limbs, motion blur, embedded text, watermark'
+    style: 'epic cinematic shot of a single menacing fantasy creature resting in its lair, mouth closed, powerful clear silhouette, volumetric atmosphere, dramatic rim lighting and drifting embers, overwhelming sense of dread and scale'
   },
   location: {
     size: { width: 2880, height: 1620 },
-    style: 'cinematic establishing shot, wide empty atmospheric fantasy environment, volumetric god rays, rich depth and mood, golden-hour or torchlit ambience, hyperdetailed architecture and landscape, photorealistic, painterly concept-art tone',
-    neg: 'crowd of people in foreground, cartoon, blurry, flat lighting, embedded text, watermark'
+    style: 'cinematic photorealistic establishing landscape shot, wide-angle architectural photography composition of an atmospheric fantasy place, volumetric god rays, rich depth and mood, golden-hour or torchlit ambience, drifting dust and mist'
   },
   item: {
     size: { width: 1800, height: 2400 },
-    style: 'still-life product photography of a single fantasy hero object, dramatic single-source light, dark moody background, hyperdetailed material and wear such as aged metal cracked leather and parchment, photorealistic, museum-quality, shallow depth of field',
-    neg: 'hands, cluttered scene, cartoon, blurry, embedded text, watermark'
+    style: 'cinematic still-life product photography of a single fantasy hero object, dramatic single-source light, dark moody background, hyperdetailed material and wear such as aged metal cracked leather and parchment, museum-quality'
   }
 };
 const STUDIO_NUANCE = [
@@ -1435,8 +1433,9 @@ function studioSanitize(s) {
 async function studioEnrich(type, subject) {
   if (!ANTHROPIC_KEY) return null;
   const recipe = STUDIO_RECIPES[type] || STUDIO_RECIPES.npc;
-  const system = `You are EndoCraft's image-prompt engineer. Turn the user's short idea into ONE vivid prompt for a ${type} rendered in EndoCraft's signature look: ${recipe.style}.
-Hard rules: describe exactly ONE subject; lead with concrete visual detail (pose, material, lighting, mood, era); grounded period-accurate medieval-fantasy; 40-70 words; do NOT write any meta words, do NOT use "no"/"without"/negations, do NOT request any text/letters/logos in the image. Output ONLY the final prompt text, nothing else.`;
+  const system = `You are EndoCraft's image-prompt engineer. Expand the user's idea into ONE vivid Seedream prompt for a ${type}, in EndoCraft's signature Cinematic Fantasy Photography look. Compose in this order: shot type, then the subject with emotion, then environment, then lighting. Apply this look: ${recipe.style}.
+House rules (critical): describe exactly ONE subject; open with a concrete cinematic shot type and strong directional lighting; add atmospheric particles (dust, embers, mist); name a concrete time of day or weather; favour an aftermath or a held still moment over mid-action; never include projectiles in flight, hand-to-hand exchanges, two interlocking hands, readable text, mirrors, exact counts, or string instruments. ${type === 'location' ? 'This is an empty place: describe ONLY architecture, landscape and atmosphere; do not mention any person, creature, figure or silhouette at all, not even to exclude them.' : 'Describe exactly ONE person or creature, clearly.'}
+40-70 words. No meta words, no "no"/"without"/negation phrases, no instructions about text. Output ONLY the prompt text.`;
   try {
     const r = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -1471,10 +1470,10 @@ app.post('/api/studio-image', async (req, res) => {
     const clean = studioSanitize(subject);
     if (!clean) return res.status(400).json({ error: 'please describe your idea in a few words' });
     let core = await studioEnrich(t, clean);
-    if (!core) core = `${clean}, ${recipe.style}`;
+    if (!core) core = `${recipe.style}, ${clean}`;
     const n = Math.max(1, Math.min(4, parseInt(variants, 10) || 3));
     const jobs = Array.from({ length: n }, (_, i) =>
-      studioGenerateOne(`${core}. ${recipe.style}. Negative: ${recipe.neg}${STUDIO_NUANCE[i % STUDIO_NUANCE.length]}`, recipe.size));
+      studioGenerateOne(`${core}. ${STUDIO_SUFFIX}${STUDIO_NUANCE[i % STUDIO_NUANCE.length]}`, recipe.size));
     const settled = await Promise.allSettled(jobs);
     const urls = settled.filter(s => s.status === 'fulfilled').map(s => s.value);
     if (urls.length === 0) {
