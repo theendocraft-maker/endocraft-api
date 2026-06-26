@@ -3178,6 +3178,30 @@ app.post('/api/free-pack/subscribe', async (req, res) => {
   }
 });
 
+// ─── Admin: send a custom transactional email (lead replies etc.) via Resend ───
+app.post('/api/admin/send-email', async (req, res) => {
+  if (!checkAdminKey(req, res)) return;
+  if (!resendActive) return res.status(500).json({ error: 'RESEND_API_KEY not set' });
+  const { to, subject, text, html, replyTo } = req.body || {};
+  const toNorm = String(to || '').trim().toLowerCase();
+  if (!toNorm || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toNorm)) return res.status(400).json({ error: 'valid "to" email required' });
+  if (!subject || (!text && !html)) return res.status(400).json({ error: 'subject and (text or html) required' });
+  try {
+    const payload = { from: RESEND_FROM, to: [toNorm], subject: String(subject) };
+    if (text) payload.text = String(text);
+    if (html) payload.html = String(html);
+    if (replyTo) payload.reply_to = String(replyTo);
+    const r = await fetchWithTimeout('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(502).json({ error: `Resend HTTP ${r.status}`, detail: JSON.stringify(data).slice(0, 300) });
+    res.json({ ok: true, id: data.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Wishes-Feature · Adventure-Wünsche von /free thank-you Screen ───
 // Linked-mode: PATCHes free_pack_leads.wish by email
 // Anon-mode: separate row mit email=null (für Etsy Shop Announcement traffic)
