@@ -1486,7 +1486,7 @@ app.post('/api/studio-image', async (req, res) => {
       fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_generations`, {
         method: 'POST',
         headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-        body: JSON.stringify({ code: String((req.body && req.body.code) || '').slice(0, 40) || null, type: t, subject: clean.slice(0, 400), urls, ip: ipg || null })
+        body: JSON.stringify({ code: String((req.body && req.body.code) || '').slice(0, 40) || null, type: t, subject: clean.slice(0, 400), prompt: `${core}. ${STUDIO_SUFFIX}`.slice(0, 1500), urls, ip: ipg || null })
       }).catch(() => {});
     }
     res.json({ urls, type: t });
@@ -1497,10 +1497,26 @@ app.get('/api/admin/studio-gallery', async (req, res) => {
   if (!checkAdminKey(req, res)) return;
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/studio_generations?select=id,code,type,subject,urls,created_at&order=created_at.desc&limit=300`;
+    const url = `${SUPABASE_URL}/rest/v1/studio_generations?select=id,code,type,subject,prompt,rating,urls,created_at&order=created_at.desc&limit=300`;
     const r = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const data = await r.json();
     res.json({ items: Array.isArray(data) ? data : [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/studio-rate', async (req, res) => {
+  if (!checkAdminKey(req, res)) return;
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
+  const id = parseInt((req.body && req.body.id), 10);
+  const rating = parseInt((req.body && req.body.rating), 10);
+  if (!id) return res.status(400).json({ error: 'id required' });
+  try {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_generations?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ rating: (rating === 1 || rating === -1) ? rating : null })
+    });
+    res.json({ ok: r.ok });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
