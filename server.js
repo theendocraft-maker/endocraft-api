@@ -1430,11 +1430,12 @@ function studioSanitize(s) {
     .replace(/\b(text|words|letters|caption|captions|title|logo|watermark|signature)\b/gi, ' ')
     .replace(/\s{2,}/g, ' ').trim();
 }
-async function studioEnrich(type, subject) {
+async function studioEnrich(type, subject, feedback) {
   if (!ANTHROPIC_KEY) return null;
   const recipe = STUDIO_RECIPES[type] || STUDIO_RECIPES.npc;
+  const fbLine = feedback ? `\nThe user was unhappy with the previous result and asked to change this: "${String(feedback).slice(0, 300)}". Revise the prompt to clearly address that, while keeping the same core subject.` : '';
   const system = `You are EndoCraft's image-prompt engineer. Expand the user's idea into ONE vivid Seedream prompt for a ${type}, in EndoCraft's signature Cinematic Fantasy Photography look. Compose in this order: shot type, then the subject with emotion, then environment, then lighting. Apply this look: ${recipe.style}.
-House rules (critical): describe exactly ONE subject; open with a concrete cinematic shot type and strong directional lighting; add atmospheric particles (dust, embers, mist); name a concrete time of day or weather; favour an aftermath or a held still moment over mid-action; never include projectiles in flight, hand-to-hand exchanges, two interlocking hands, readable text, mirrors, exact counts, or string instruments. ${type === 'location' ? 'This is an empty place: describe ONLY architecture, landscape and atmosphere; do not mention any person, creature, figure or silhouette at all, not even to exclude them.' : 'Describe exactly ONE person or creature, clearly.'}
+House rules (critical): describe exactly ONE subject; open with a concrete cinematic shot type and strong directional lighting; add atmospheric particles (dust, embers, mist); name a concrete time of day or weather; favour an aftermath or a held still moment over mid-action; never include projectiles in flight, hand-to-hand exchanges, two interlocking hands, readable text, mirrors, exact counts, or string instruments. ${type === 'location' ? 'This is an empty place: describe ONLY architecture, landscape and atmosphere; do not mention any person, creature, figure or silhouette at all, not even to exclude them.' : 'Describe exactly ONE person or creature, clearly.'}${fbLine}
 40-70 words. No meta words, no "no"/"without"/negation phrases, no instructions about text. Output ONLY the prompt text.`;
   try {
     const r = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
@@ -1463,13 +1464,13 @@ async function studioGenerateOne(prompt, size) {
 }
 app.post('/api/studio-image', async (req, res) => {
   try {
-    const { type = 'npc', subject, variants = 3 } = req.body || {};
+    const { type = 'npc', subject, variants = 3, feedback } = req.body || {};
     if (!subject || !String(subject).trim()) return res.status(400).json({ error: 'subject required' });
     const t = STUDIO_RECIPES[type] ? type : 'npc';
     const recipe = STUDIO_RECIPES[t];
     const clean = studioSanitize(subject);
     if (!clean) return res.status(400).json({ error: 'please describe your idea in a few words' });
-    let core = await studioEnrich(t, clean);
+    let core = await studioEnrich(t, clean, feedback);
     if (!core) core = `${recipe.style}, ${clean}`;
     const n = Math.max(1, Math.min(4, parseInt(variants, 10) || 3));
     const jobs = Array.from({ length: n }, (_, i) =>
@@ -1486,7 +1487,7 @@ app.post('/api/studio-image', async (req, res) => {
       fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_generations`, {
         method: 'POST',
         headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-        body: JSON.stringify({ code: String((req.body && req.body.code) || '').slice(0, 40) || null, type: t, subject: clean.slice(0, 400), prompt: `${core}. ${STUDIO_SUFFIX}`.slice(0, 1500), urls, ip: ipg || null })
+        body: JSON.stringify({ code: String((req.body && req.body.code) || '').slice(0, 40) || null, type: t, subject: clean.slice(0, 400), prompt: `${core}. ${STUDIO_SUFFIX}`.slice(0, 1500), feedback: feedback ? String(feedback).slice(0, 400) : null, urls, ip: ipg || null })
       }).catch(() => {});
     }
     res.json({ urls, type: t });
