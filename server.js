@@ -1430,6 +1430,17 @@ function studioSanitize(s) {
     .replace(/\b(text|words|letters|caption|captions|title|logo|watermark|signature)\b/gi, ' ')
     .replace(/\s{2,}/g, ' ').trim();
 }
+// Child-safety: block prompts describing minors before any generation.
+function studioMinorBlock(s) {
+  const t = String(s || '').toLowerCase();
+  const words = /\b(child|children|toddler|infant|baby|newborn|kid|kids|preteen|pre-teen|teen|teenage|teenager|adolescent|minor|schoolgirl|schoolboy|underage|loli)\b/;
+  const qualified = /\b(little|young|small|tiny|baby)\b[\w\s,'-]{0,24}\b(girl|boy|child|girls|boys)\b/;
+  const age = /\b([0-9]|1[0-7])\s*-?\s*(year|yr)s?\s*-?\s*old\b/;
+  if (words.test(t) || qualified.test(t) || age.test(t)) {
+    return 'EndoCraft Studio creates adult characters, monsters and locations only — please describe an adult hero or villain, a creature, or a place.';
+  }
+  return null;
+}
 async function studioEnrich(type, subject, feedback) {
   if (!ANTHROPIC_KEY) return null;
   const recipe = STUDIO_RECIPES[type] || STUDIO_RECIPES.npc;
@@ -1466,6 +1477,8 @@ app.post('/api/studio-image', async (req, res) => {
   try {
     const { type = 'npc', subject, variants = 3, feedback, beforeUrls } = req.body || {};
     if (!subject || !String(subject).trim()) return res.status(400).json({ error: 'subject required' });
+    const minorBlock = studioMinorBlock(subject);
+    if (minorBlock) return res.status(400).json({ error: minorBlock });
     const t = STUDIO_RECIPES[type] ? type : 'npc';
     const recipe = STUDIO_RECIPES[t];
     const clean = studioSanitize(subject);
