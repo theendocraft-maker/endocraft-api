@@ -1482,15 +1482,35 @@ app.post('/api/studio-image', async (req, res) => {
       const msg = (reason && reason.message) || 'generation failed';
       return res.status(502).json({ error: msg });
     }
+    let genId = null;
     if (SUPABASE_URL && SUPABASE_KEY) {
       const ipg = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').toString().split(',')[0].trim();
-      fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_generations`, {
-        method: 'POST',
-        headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-        body: JSON.stringify({ code: String((req.body && req.body.code) || '').slice(0, 40) || null, type: t, subject: clean.slice(0, 400), prompt: `${core}. ${STUDIO_SUFFIX}`.slice(0, 1500), feedback: feedback ? String(feedback).slice(0, 400) : null, before_urls: Array.isArray(beforeUrls) && beforeUrls.length ? beforeUrls.slice(0, 4) : null, urls, ip: ipg || null })
-      }).catch(() => {});
+      try {
+        const ins = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_generations`, {
+          method: 'POST',
+          headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+          body: JSON.stringify({ code: String((req.body && req.body.code) || '').slice(0, 40) || null, type: t, subject: clean.slice(0, 400), prompt: `${core}. ${STUDIO_SUFFIX}`.slice(0, 1500), feedback: feedback ? String(feedback).slice(0, 400) : null, before_urls: Array.isArray(beforeUrls) && beforeUrls.length ? beforeUrls.slice(0, 4) : null, urls, ip: ipg || null })
+        });
+        const row = await ins.json();
+        genId = Array.isArray(row) && row[0] ? row[0].id : ((row && row.id) || null);
+      } catch (e) {}
     }
-    res.json({ urls, type: t });
+    res.json({ urls, type: t, id: genId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/studio-pick', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.json({ ok: false });
+  const id = parseInt((req.body && req.body.id), 10);
+  const chosen = parseInt((req.body && req.body.chosen), 10);
+  if (!id || isNaN(chosen) || chosen < 0 || chosen > 3) return res.status(400).json({ error: 'bad params' });
+  try {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_generations?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ chosen_index: chosen })
+    });
+    res.json({ ok: r.ok });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1498,7 +1518,7 @@ app.get('/api/admin/studio-gallery', async (req, res) => {
   if (!checkAdminKey(req, res)) return;
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/studio_generations?select=id,code,type,subject,prompt,feedback,before_urls,rating,urls,created_at&order=created_at.desc&limit=300`;
+    const url = `${SUPABASE_URL}/rest/v1/studio_generations?select=id,code,type,subject,prompt,feedback,before_urls,chosen_index,rating,urls,created_at&order=created_at.desc&limit=300`;
     const r = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const data = await r.json();
     res.json({ items: Array.isArray(data) ? data : [] });
