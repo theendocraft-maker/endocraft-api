@@ -1498,7 +1498,7 @@ app.get('/api/admin/studio-gallery', async (req, res) => {
   if (!checkAdminKey(req, res)) return;
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/studio_generations?select=id,code,type,subject,prompt,rating,urls,created_at&order=created_at.desc&limit=300`;
+    const url = `${SUPABASE_URL}/rest/v1/studio_generations?select=id,code,type,subject,prompt,feedback,rating,urls,created_at&order=created_at.desc&limit=300`;
     const r = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const data = await r.json();
     res.json({ items: Array.isArray(data) ? data : [] });
