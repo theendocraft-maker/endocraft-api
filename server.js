@@ -1464,7 +1464,7 @@ async function studioGenerateOne(prompt, size) {
 }
 app.post('/api/studio-image', async (req, res) => {
   try {
-    const { type = 'npc', subject, variants = 3, feedback } = req.body || {};
+    const { type = 'npc', subject, variants = 3, feedback, beforeUrls } = req.body || {};
     if (!subject || !String(subject).trim()) return res.status(400).json({ error: 'subject required' });
     const t = STUDIO_RECIPES[type] ? type : 'npc';
     const recipe = STUDIO_RECIPES[t];
@@ -1487,7 +1487,7 @@ app.post('/api/studio-image', async (req, res) => {
       fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_generations`, {
         method: 'POST',
         headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-        body: JSON.stringify({ code: String((req.body && req.body.code) || '').slice(0, 40) || null, type: t, subject: clean.slice(0, 400), prompt: `${core}. ${STUDIO_SUFFIX}`.slice(0, 1500), feedback: feedback ? String(feedback).slice(0, 400) : null, urls, ip: ipg || null })
+        body: JSON.stringify({ code: String((req.body && req.body.code) || '').slice(0, 40) || null, type: t, subject: clean.slice(0, 400), prompt: `${core}. ${STUDIO_SUFFIX}`.slice(0, 1500), feedback: feedback ? String(feedback).slice(0, 400) : null, before_urls: Array.isArray(beforeUrls) && beforeUrls.length ? beforeUrls.slice(0, 4) : null, urls, ip: ipg || null })
       }).catch(() => {});
     }
     res.json({ urls, type: t });
@@ -1498,7 +1498,7 @@ app.get('/api/admin/studio-gallery', async (req, res) => {
   if (!checkAdminKey(req, res)) return;
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
   try {
-    const url = `${SUPABASE_URL}/rest/v1/studio_generations?select=id,code,type,subject,prompt,feedback,rating,urls,created_at&order=created_at.desc&limit=300`;
+    const url = `${SUPABASE_URL}/rest/v1/studio_generations?select=id,code,type,subject,prompt,feedback,before_urls,rating,urls,created_at&order=created_at.desc&limit=300`;
     const r = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     const data = await r.json();
     res.json({ items: Array.isArray(data) ? data : [] });
