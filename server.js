@@ -595,8 +595,20 @@ app.get('/api/parties/:code/members', async (req, res) => {
 //   code text pk, email text, label text, credits int default 30,
 //   active bool default true, created_at timestamptz, redeemed_at timestamptz
 // Codes liegen NICHT mehr im Frontend → nicht mehr erratbar; pro Empfänger einzigartig + deaktivierbar.
+// In-memory Rate-Limit gegen Brute-Force (max 30 Versuche / IP / 10 Min).
+const _redeemHits = new Map();
+function _redeemLimited(ip) {
+  const now = Date.now(), win = 10 * 60 * 1000, max = 30;
+  const arr = (_redeemHits.get(ip) || []).filter(t => now - t < win);
+  arr.push(now);
+  _redeemHits.set(ip, arr);
+  if (_redeemHits.size > 5000) { for (const [k, v] of _redeemHits) { if (!v.some(t => now - t < win)) _redeemHits.delete(k); } }
+  return arr.length > max;
+}
 app.post('/api/redeem-code', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || 'unknown';
+  if (_redeemLimited(ip)) return res.status(429).json({ ok: false, error: 'too many attempts' });
   const code = String(req.body?.code || '').toUpperCase().trim();
   if (!code || code.length < 4 || code.length > 40 || !/^[A-Z0-9-]+$/.test(code)) {
     return res.status(400).json({ ok: false, error: 'code required' });
@@ -617,6 +629,49 @@ app.post('/api/redeem-code', async (req, res) => {
       body: JSON.stringify({ redeemed_at: new Date().toISOString() })
     }).catch(() => {});
     res.json({ ok: true, code: row.code, credits: row.credits | 0 });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ───────── CREDIT-HELPERS (server-autoritativ, siehe 010_server_credits.sql) ─────────
+async function spendCredits(code, cost) {
+  const c = String(code || '').toUpperCase().trim();
+  if (!c || !SUPABASE_URL || !SUPABASE_KEY) return { status: 'error', balance: 0 };
+  try {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/rpc/spend_credits`, {
+      method: 'POST',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_code: c, p_cost: cost })
+    });
+    const data = await r.json();
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!r.ok || !row) return { status: 'error', balance: 0 };
+    return { status: row.status, balance: row.balance | 0 };
+  } catch (e) { return { status: 'error', balance: 0 }; }
+}
+async function addCredits(code, amount) {
+  const c = String(code || '').toUpperCase().trim();
+  if (!c || !SUPABASE_URL || !SUPABASE_KEY) return -1;
+  try {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/rpc/add_credits`, {
+      method: 'POST',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_code: c, p_amount: amount })
+    });
+    const data = await r.json();
+    return (typeof data === 'number') ? data : -1;
+  } catch (e) { return -1; }
+}
+// GET /api/credits?code= — aktuellen Kontostand lesen (read-only, kein Abbuchen).
+app.get('/api/credits', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const code = String(req.query.code || '').toUpperCase().trim();
+  if (!code) return res.status(400).json({ ok: false, error: 'code required' });
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/beta_codes?code=eq.${encodeURIComponent(code)}&select=credits,active&limit=1`;
+    const r = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const rows = await r.json();
+    if (!Array.isArray(rows) || !rows.length || rows[0].active === false) return res.status(404).json({ ok: false, error: 'invalid code' });
+    res.json({ ok: true, credits: rows[0].credits | 0 });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -1505,7 +1560,7 @@ async function studioGenerateOne(prompt, size) {
 }
 app.post('/api/studio-image', async (req, res) => {
   try {
-    const { type = 'npc', subject, variants = 3, feedback, beforeUrls } = req.body || {};
+    const { type = 'npc', subject, variants = 3, feedback, beforeUrls, code } = req.body || {};
     if (!subject || !String(subject).trim()) return res.status(400).json({ error: 'subject required' });
     const minorBlock = studioMinorBlock(subject);
     if (minorBlock) return res.status(400).json({ error: minorBlock });
@@ -1516,14 +1571,27 @@ app.post('/api/studio-image', async (req, res) => {
     let core = await studioEnrich(t, clean, feedback);
     if (!core) core = `${recipe.style}, ${clean}`;
     const n = Math.max(1, Math.min(4, parseInt(variants, 10) || 3));
+    // Server-autoritative Abbuchung: 1 Credit pro Variante, VOR der Generierung.
+    const codeC = String(code || '').toUpperCase().trim();
+    if (!codeC) return res.status(401).json({ error: 'code required' });
+    const spend = await spendCredits(codeC, n);
+    if (spend.status !== 'ok') {
+      if (spend.status === 'insufficient') return res.status(402).json({ error: 'Not enough credits', status: spend.status, balance: spend.balance });
+      if (spend.status === 'inactive') return res.status(403).json({ error: 'This code is no longer active', status: spend.status });
+      if (spend.status === 'invalid') return res.status(403).json({ error: 'Invalid code', status: spend.status });
+      return res.status(500).json({ error: 'Could not charge credits' });
+    }
+    let balance = spend.balance;
     const jobs = Array.from({ length: n }, (_, i) =>
       studioGenerateOne(`${core}. ${STUDIO_SUFFIX}${STUDIO_NUANCE[i % STUDIO_NUANCE.length]}`, recipe.size));
     const settled = await Promise.allSettled(jobs);
     const urls = settled.filter(s => s.status === 'fulfilled').map(s => s.value);
+    // Fehlgeschlagene Varianten zurückbuchen (nur gelieferte zählen).
+    if (urls.length < n) { const nb = await addCredits(codeC, n - urls.length); if (nb >= 0) balance = nb; }
     if (urls.length === 0) {
       const reason = (settled.find(s => s.status === 'rejected') || {}).reason;
       const msg = (reason && reason.message) || 'generation failed';
-      return res.status(502).json({ error: msg });
+      return res.status(502).json({ error: msg, balance });
     }
     let genId = null;
     if (SUPABASE_URL && SUPABASE_KEY) {
@@ -1538,7 +1606,7 @@ app.post('/api/studio-image', async (req, res) => {
         genId = Array.isArray(row) && row[0] ? row[0].id : ((row && row.id) || null);
       } catch (e) {}
     }
-    res.json({ urls, type: t, id: genId });
+    res.json({ urls, type: t, id: genId, balance });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1676,8 +1744,19 @@ app.get('/api/image/proxy', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.post('/api/video', async (req, res) => {
   try {
-    const { prompt, image_url, model = 'kling-video/v2.1/standard/image-to-video', duration = 5, negative_prompt, cfg_scale } = req.body || {};
+    const { prompt, image_url, model = 'kling-video/v2.1/standard/image-to-video', duration = 5, negative_prompt, cfg_scale, code } = req.body || {};
     if (!image_url && !prompt) return res.status(400).json({ error: 'image_url or prompt required' });
+    // Server-autoritative Abbuchung: 1 Clip = 4 Credits, vor Job-Start.
+    const VIDEO_COST = 4;
+    const codeC = String(code || '').toUpperCase().trim();
+    if (!codeC) return res.status(401).json({ error: 'code required' });
+    const spend = await spendCredits(codeC, VIDEO_COST);
+    if (spend.status !== 'ok') {
+      if (spend.status === 'insufficient') return res.status(402).json({ error: 'Not enough credits', status: spend.status, balance: spend.balance });
+      if (spend.status === 'inactive') return res.status(403).json({ error: 'This code is no longer active', status: spend.status });
+      if (spend.status === 'invalid') return res.status(403).json({ error: 'Invalid code', status: spend.status });
+      return res.status(500).json({ error: 'Could not charge credits' });
+    }
     const body = { model };
     if (prompt) body.prompt = prompt;
     if (image_url) body.image_url = image_url;
@@ -1691,8 +1770,11 @@ app.post('/api/video', async (req, res) => {
     }, 60000);
     const data = await r.json().catch(() => ({}));
     console.log('[video] create:', JSON.stringify(data).substring(0, 300));
-    if (!r.ok || data.error) return res.status(r.status >= 400 ? r.status : 500).json({ error: data.error || ('HTTP ' + r.status), raw: data });
-    return res.json({ id: data.id, status: data.status });
+    if (!r.ok || data.error) {
+      await addCredits(codeC, VIDEO_COST); // Job nicht gestartet → zurückbuchen
+      return res.status(r.status >= 400 ? r.status : 500).json({ error: data.error || ('HTTP ' + r.status), raw: data });
+    }
+    return res.json({ id: data.id, status: data.status, balance: spend.balance });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
