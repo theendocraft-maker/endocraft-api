@@ -590,6 +590,36 @@ app.get('/api/parties/:code/members', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ───────── STUDIO BETA CODES (server-validated, per-recipient) ─────────
+// Tabelle beta_codes (siehe supabase-migrations/009_beta_codes.sql):
+//   code text pk, email text, label text, credits int default 30,
+//   active bool default true, created_at timestamptz, redeemed_at timestamptz
+// Codes liegen NICHT mehr im Frontend → nicht mehr erratbar; pro Empfänger einzigartig + deaktivierbar.
+app.post('/api/redeem-code', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const code = String(req.body?.code || '').toUpperCase().trim();
+  if (!code || code.length < 4 || code.length > 40 || !/^[A-Z0-9-]+$/.test(code)) {
+    return res.status(400).json({ ok: false, error: 'code required' });
+  }
+  try {
+    const url = `${SUPABASE_URL}/rest/v1/beta_codes?code=eq.${encodeURIComponent(code)}&select=code,credits,active&limit=1`;
+    const resp = await fetchWithTimeout(url, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const rows = await resp.json();
+    if (!resp.ok) return res.status(resp.status).json({ ok: false, error: rows?.message || 'lookup failed' });
+    if (!Array.isArray(rows) || !rows.length || rows[0].active === false) {
+      return res.status(404).json({ ok: false, error: 'invalid code' });
+    }
+    const row = rows[0];
+    // First redemption stamp (best-effort, non-blocking)
+    fetchWithTimeout(`${SUPABASE_URL}/rest/v1/beta_codes?code=eq.${encodeURIComponent(code)}&redeemed_at=is.null`, {
+      method: 'PATCH',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ redeemed_at: new Date().toISOString() })
+    }).catch(() => {});
+    res.json({ ok: true, code: row.code, credits: row.credits | 0 });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 // ───────── PARTY-MILESTONES ─────────
 // Schwellen + Beschreibungen. Backend setzt Achievements automatisch wenn erreicht.
 const PARTY_MILESTONES = [
