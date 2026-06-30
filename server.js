@@ -1715,6 +1715,62 @@ app.get('/api/admin/studio-gallery', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Code-Tracking: pro Beta-Code Aktivierung/Generierungen/Rest-Credits + Kanal-Aggregation (Label).
+app.get('/api/admin/code-stats', async (req, res) => {
+  if (!checkAdminKey(req, res)) return;
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
+  try {
+    const H = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
+    const [codesR, gensR] = await Promise.all([
+      fetchWithTimeout(`${SUPABASE_URL}/rest/v1/beta_codes?select=code,email,label,credits,active,created_at,redeemed_at&order=created_at.desc`, { headers: H }),
+      fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_generations?select=code,type,created_at&limit=5000`, { headers: H })
+    ]);
+    const codes = await codesR.json();
+    const gens = await gensR.json();
+    const genBy = {};
+    (Array.isArray(gens) ? gens : []).forEach(g => {
+      const c = String(g.code || '').toUpperCase();
+      if (!c) return;
+      if (!genBy[c]) genBy[c] = { count: 0, last: null };
+      genBy[c].count++;
+      if (!genBy[c].last || g.created_at > genBy[c].last) genBy[c].last = g.created_at;
+    });
+    const rows = (Array.isArray(codes) ? codes : []).map(c => {
+      const g = genBy[String(c.code || '').toUpperCase()] || { count: 0, last: null };
+      return {
+        code: c.code,
+        label: c.label || '—',
+        credits_remaining: c.credits,
+        active: c.active,
+        created_at: c.created_at,
+        redeemed_at: c.redeemed_at,
+        generations: g.count,
+        last_generation_at: g.last,
+        activated: g.count > 0
+      };
+    });
+    const byLabel = {};
+    rows.forEach(r => {
+      const L = r.label || '—';
+      if (!byLabel[L]) byLabel[L] = { label: L, codes: 0, activated: 0, generations: 0, credits_remaining: 0 };
+      byLabel[L].codes++;
+      if (r.activated) byLabel[L].activated++;
+      byLabel[L].generations += r.generations;
+      byLabel[L].credits_remaining += (r.credits_remaining || 0);
+    });
+    res.json({
+      ok: true,
+      totals: {
+        codes: rows.length,
+        activated: rows.filter(r => r.activated).length,
+        generations: rows.reduce((s, r) => s + r.generations, 0)
+      },
+      by_channel: Object.values(byLabel).sort((a, b) => b.generations - a.generations),
+      codes: rows
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/admin/studio-rate', async (req, res) => {
   if (!checkAdminKey(req, res)) return;
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
@@ -2541,6 +2597,106 @@ app.get('/c/:id', async (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'public, max-age=60');
   res.send(renderCardSharePage(card));
+});
+
+// ─── Studio share assets: save a generated image/video, serve a public share page at /s/:id ───
+app.post('/api/save-asset', async (req, res) => {
+  try {
+    const { media_type, kind, url, subject, code } = req.body || {};
+    if (!url || typeof url !== 'string') return res.status(400).json({ error: 'url required' });
+    if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+    const body = {
+      media_type: (media_type === 'video') ? 'video' : 'image',
+      kind: kind ? String(kind).slice(0, 24) : null,
+      url: String(url).slice(0, 2000),
+      subject: subject ? String(subject).slice(0, 300) : null,
+      code: code ? String(code).slice(0, 40) : null
+    };
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_assets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Prefer': 'return=representation' },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) { const t = await r.text(); console.error('save-asset error', r.status, t); return res.status(500).json({ error: 'save failed', detail: t.slice(0, 200) }); }
+    const rows = await r.json();
+    const saved = Array.isArray(rows) ? rows[0] : rows;
+    res.json({ ok: true, id: saved.id });
+  } catch (err) { console.error('save-asset handler', err); res.status(500).json({ error: err.message }); }
+});
+
+async function fetchAssetById(id) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
+  try {
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_assets?id=eq.${encodeURIComponent(id)}&select=*`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    if (!r.ok) return null;
+    const rows = await r.json();
+    return Array.isArray(rows) && rows.length ? rows[0] : null;
+  } catch (e) { return null; }
+}
+
+function renderAssetSharePage(a) {
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const isVideo = a.media_type === 'video';
+  const proxied = (isVideo ? '/api/video/proxy?url=' : '/api/image/proxy?url=') + encodeURIComponent(a.url);
+  const base = 'https://endocraft-production.up.railway.app';
+  const subject = esc(a.subject || 'A cinematic D&D creation');
+  const ogImage = isVideo ? 'https://endocraft.app/studio/og-image.jpg' : (base + proxied);
+  const media = isVideo
+    ? `<video src="${proxied}" autoplay loop muted playsinline controls style="width:100%;height:100%;object-fit:contain;background:#06030a"></video>`
+    : `<img src="${proxied}" alt="${subject}" style="width:100%;height:100%;object-fit:contain;background:#06030a">`;
+  return `<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${subject} · EndoCraft</title>
+<meta name="description" content="A cinematic, hand-crafted D&D ${isVideo ? 'cutscene' : 'scene'} made in the EndoCraft Studio.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="EndoCraft">
+<meta property="og:title" content="${subject} · EndoCraft">
+<meta property="og:description" content="Cinematic D&D art & cutscenes — make your own free.">
+<meta property="og:image" content="${ogImage}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="${ogImage}">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=EB+Garamond&display=swap');
+*{box-sizing:border-box}body{margin:0;background:#0c0e16;color:#f3ecda;font-family:'EB Garamond',Georgia,serif;display:flex;flex-direction:column;align-items:center;min-height:100vh}
+.wrap{max-width:680px;width:100%;padding:24px 18px 70px;text-align:center}
+.brand{font-family:'Cinzel';font-weight:700;letter-spacing:1px;color:#d8b46a;font-size:18px;text-decoration:none;display:inline-block;margin-bottom:18px}
+.brand span{color:#9aa0ae;font-size:11px;letter-spacing:2px}
+.media{width:100%;aspect-ratio:1/1;max-height:72vh;border-radius:14px;overflow:hidden;border:1px solid #2a2f42;background:#06030a;display:flex;align-items:center;justify-content:center}
+h1{font-family:'Cinzel';font-size:21px;color:#f3ecda;margin:20px 0 4px;line-height:1.3}
+.sub{color:#9aa0ae;font-size:14px;margin-bottom:24px}
+.cta{display:block;background:#171a26;border:1px solid #9c8244;border-radius:14px;padding:22px;margin-top:10px}
+.cta .k{font-family:'Cinzel';font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#d8b46a}
+.cta .h{font-family:'Cinzel';font-size:19px;color:#f3ecda;margin:8px 0 6px}
+.btn{display:inline-block;margin-top:12px;background:#d8b46a;color:#1a1408;font-family:'Cinzel';font-weight:700;font-size:14px;letter-spacing:1px;text-transform:uppercase;padding:13px 26px;border-radius:8px;text-decoration:none}
+footer{margin-top:30px;color:#6b7180;font-size:12px}
+</style></head><body><div class="wrap">
+<a class="brand" href="https://endocraft.app/">EndoCraft <span>STUDIO</span></a>
+<div class="media">${media}</div>
+<h1>${subject}</h1>
+<div class="sub">Made in the EndoCraft Studio — cinematic, hand-curated D&amp;D art.</div>
+<div class="cta">
+  <div class="k">Free · no catch</div>
+  <div class="h">Make your own cinematic D&amp;D art</div>
+  <div style="color:#9aa0ae;font-size:14px">Describe a hero, monster or place — we craft it and send it to your inbox.</div>
+  <a class="btn" href="https://endocraft.app/free/?utm_source=share&utm_medium=studio&utm_campaign=asset">Get yours free &rarr;</a>
+</div>
+<footer>endocraft.app</footer>
+</div></body></html>`;
+}
+
+app.get('/s/:id', async (req, res) => {
+  const id = req.params.id;
+  if (!id || !/^[a-f0-9-]{10,}$/i.test(id)) return res.status(400).send('<h1>Invalid asset ID</h1>');
+  const asset = await fetchAssetById(id);
+  if (!asset) {
+    res.status(404).setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.send('<!DOCTYPE html><html><head><title>Not found · EndoCraft</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{background:#0c0e16;color:#f3ecda;font-family:system-ui;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:20px;text-align:center}a{color:#d8b46a;margin-top:20px}</style></head><body><h1 style="font-family:Georgia,serif;font-style:italic;opacity:.7">This creation has faded.</h1><p>The link may have expired.</p><a href="https://endocraft.app/free/">→ Make your own free</a></body></html>');
+  }
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.send(renderAssetSharePage(asset));
 });
 
 // Helper endpoint: convert email → slug (for returning users who know their email but not the slug)
