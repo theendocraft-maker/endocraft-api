@@ -19,7 +19,7 @@ function emailToSlug(email){
     .slice(0, 16);
 }
 app.use(cors());
-app.use(express.json({ limit: '45mb' })); // 45mb: Etsy-Digital-Files (max 20MB binär ≈ 27MB base64) laufen als JSON durch
+app.use(express.json({ limit: '45mb', verify: (req, _res, buf) => { req.rawBody = buf; } })); // 45mb: Etsy-Digital-Files (max 20MB binär ≈ 27MB base64) laufen als JSON durch; rawBody für Stripe-Webhook-Signatur
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const REPLICATE_KEY = process.env.REPLICATE_API_KEY;
 const AIML_KEY = process.env.AIML_API_KEY;
@@ -673,6 +673,85 @@ app.get('/api/credits', async (req, res) => {
     if (!Array.isArray(rows) || !rows.length || rows[0].active === false) return res.status(404).json({ ok: false, error: 'invalid code' });
     res.json({ ok: true, credits: rows[0].credits | 0 });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ───────── STRIPE — CREDIT-KAUF (Test-Modus bis live geschaltet) ─────────
+// Credit-Packs (amount = Cent EUR). Preise/Mengen frei anpassbar.
+const CREDIT_PACKS = {
+  starter: { credits: 60,  amount: 499,  label: 'Starter — 60 credits' },
+  plus:    { credits: 160, amount: 999,  label: 'Plus — 160 credits' },
+  pro:     { credits: 400, amount: 1999, label: 'Pro — 400 credits' }
+};
+// GET /api/credit-packs — Pack-Liste fürs Frontend
+app.get('/api/credit-packs', (_req, res) => {
+  res.json({ packs: Object.entries(CREDIT_PACKS).map(([id, p]) => ({ id, credits: p.credits, amount: p.amount, label: p.label })) });
+});
+// POST /api/checkout { code, pack } → Stripe Checkout-Session, gibt { url } zurück
+app.post('/api/checkout', async (req, res) => {
+  if (!process.env.STRIPE_SECRET_KEY) return res.status(500).json({ error: 'Stripe not configured' });
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const code = String(req.body?.code || '').toUpperCase().trim();
+  const packId = String(req.body?.pack || '').toLowerCase().trim();
+  const pack = CREDIT_PACKS[packId];
+  if (!code) return res.status(400).json({ error: 'code required' });
+  if (!pack) return res.status(400).json({ error: 'invalid pack' });
+  try {
+    const chk = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/beta_codes?code=eq.${encodeURIComponent(code)}&select=active&limit=1`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    const rows = await chk.json();
+    if (!Array.isArray(rows) || !rows.length || rows[0].active === false) return res.status(404).json({ error: 'invalid code' });
+    const params = new URLSearchParams();
+    params.append('mode', 'payment');
+    params.append('success_url', 'https://endocraft.app/studio/?paid=1');
+    params.append('cancel_url', 'https://endocraft.app/studio/?canceled=1');
+    params.append('client_reference_id', code);
+    params.append('metadata[code]', code);
+    params.append('metadata[pack]', packId);
+    params.append('metadata[credits]', String(pack.credits));
+    params.append('line_items[0][quantity]', '1');
+    params.append('line_items[0][price_data][currency]', 'eur');
+    params.append('line_items[0][price_data][unit_amount]', String(pack.amount));
+    params.append('line_items[0][price_data][product_data][name]', `EndoCraft Studio — ${pack.label}`);
+    const r = await fetchWithTimeout('https://api.stripe.com/v1/checkout/sessions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${process.env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString()
+    });
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status >= 400 ? r.status : 500).json({ error: (data.error && data.error.message) || 'checkout failed' });
+    res.json({ url: data.url });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+// POST /api/stripe-webhook — signaturgeprüft; schreibt Credits nach erfolgreicher Zahlung gut (idempotent)
+app.post('/api/stripe-webhook', async (req, res) => {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  const sig = req.headers['stripe-signature'];
+  if (!secret || !sig || !req.rawBody) return res.status(400).send('bad request');
+  // Stripe-Signatur prüfen: HMAC-SHA256(secret, `${t}.${rawBody}`)
+  const parts = String(sig).split(',').reduce((a, p) => { const i = p.indexOf('='); if (i > 0) a[p.slice(0, i)] = p.slice(i + 1); return a; }, {});
+  const signedPayload = `${parts.t}.${req.rawBody.toString('utf8')}`;
+  const expected = crypto.createHmac('sha256', secret).update(signedPayload).digest('hex');
+  let valid = false;
+  try { valid = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(parts.v1 || '')); } catch (e) { valid = false; }
+  if (!valid) return res.status(400).send('invalid signature');
+  let event; try { event = JSON.parse(req.rawBody.toString('utf8')); } catch (e) { return res.status(400).send('bad json'); }
+  try {
+    if (event.type === 'checkout.session.completed') {
+      const s = event.data.object || {};
+      const code = (s.metadata && s.metadata.code) || s.client_reference_id;
+      const credits = parseInt((s.metadata && s.metadata.credits) || '0', 10);
+      if (s.payment_status === 'paid' && code && credits > 0) {
+        // Idempotenz: stripe_event_id ist UNIQUE; ignore-duplicates → nur bei NEUER Zeile gutschreiben
+        const ins = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/credit_purchases`, {
+          method: 'POST',
+          headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation,resolution=ignore-duplicates' },
+          body: JSON.stringify({ stripe_event_id: event.id, code, pack: (s.metadata && s.metadata.pack) || null, credits, amount: s.amount_total || null, currency: s.currency || null, status: 'paid' })
+        });
+        const rows = await ins.json().catch(() => []);
+        if (Array.isArray(rows) && rows.length) { await addCredits(code, credits); }
+      }
+    }
+  } catch (e) { /* nicht 500en → Stripe würde sonst endlos retrien; geloggt reicht */ console.error('[stripe-webhook]', e.message); }
+  res.json({ received: true });
 });
 
 // ───────── PARTY-MILESTONES ─────────
