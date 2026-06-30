@@ -1826,7 +1826,7 @@ app.post('/api/video', async (req, res) => {
     const { prompt, image_url, model = 'kling-video/v2.1/standard/image-to-video', duration = 5, negative_prompt, cfg_scale, code } = req.body || {};
     if (!image_url && !prompt) return res.status(400).json({ error: 'image_url or prompt required' });
     // Server-autoritative Abbuchung: 1 Clip = 4 Credits, vor Job-Start.
-    const VIDEO_COST = 4;
+    const VIDEO_COST = 8;
     const codeC = String(code || '').toUpperCase().trim();
     if (!codeC) return res.status(401).json({ error: 'code required' });
     const spend = await spendCredits(codeC, VIDEO_COST);
