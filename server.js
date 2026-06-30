@@ -2605,7 +2605,9 @@ app.post('/api/save-asset', async (req, res) => {
     const { media_type, kind, url, subject, code } = req.body || {};
     if (!url || typeof url !== 'string') return res.status(400).json({ error: 'url required' });
     if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+    const slug = crypto.randomBytes(6).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, 7) || crypto.randomBytes(4).toString('hex');
     const body = {
+      slug,
       media_type: (media_type === 'video') ? 'video' : 'image',
       kind: kind ? String(kind).slice(0, 24) : null,
       url: String(url).slice(0, 2000),
@@ -2620,14 +2622,16 @@ app.post('/api/save-asset', async (req, res) => {
     if (!r.ok) { const t = await r.text(); console.error('save-asset error', r.status, t); return res.status(500).json({ error: 'save failed', detail: t.slice(0, 200) }); }
     const rows = await r.json();
     const saved = Array.isArray(rows) ? rows[0] : rows;
-    res.json({ ok: true, id: saved.id });
+    res.json({ ok: true, id: saved.slug || saved.id });
   } catch (err) { console.error('save-asset handler', err); res.status(500).json({ error: err.message }); }
 });
 
 async function fetchAssetById(id) {
   if (!SUPABASE_URL || !SUPABASE_KEY) return null;
   try {
-    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_assets?id=eq.${encodeURIComponent(id)}&select=*`, {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    const filter = isUuid ? `id=eq.${encodeURIComponent(id)}` : `slug=eq.${encodeURIComponent(id)}`;
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/studio_assets?${filter}&select=*`, {
       headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
     });
     if (!r.ok) return null;
@@ -2688,7 +2692,7 @@ footer{margin-top:30px;color:#6b7180;font-size:12px}
 
 app.get('/s/:id', async (req, res) => {
   const id = req.params.id;
-  if (!id || !/^[a-f0-9-]{10,}$/i.test(id)) return res.status(400).send('<h1>Invalid asset ID</h1>');
+  if (!id || !/^[A-Za-z0-9_-]{5,40}$/.test(id)) return res.status(400).send('<h1>Invalid asset ID</h1>');
   const asset = await fetchAssetById(id);
   if (!asset) {
     res.status(404).setHeader('Content-Type', 'text/html; charset=utf-8');
