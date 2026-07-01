@@ -56,6 +56,43 @@ function checkAdminKey(req, res) {
   return true;
 }
 
+// Internal-Auth-Helper: accepts INTERNAL_KEY (ADMIN_KEY works as superset) via
+// header x-internal-key OR query ?key=. Returns true if a valid key is present.
+// Does NOT write a response.
+function hasInternalKey(req) {
+  const internalKey = process.env.INTERNAL_KEY;
+  const adminKey = process.env.ADMIN_KEY;
+  const provided = req.headers['x-internal-key'] || req.query.key;
+  if (!provided) return false;
+  if (internalKey && provided === internalKey) return true;
+  if (adminKey && provided === adminKey) return true;
+  return false;
+}
+
+// Same-origin gate for browser tools: allow requests whose Origin/Referer host is
+// on endocraft.app (so the studio/bundle/dm tools keep working without a client key).
+const ALLOWED_IMAGE_ORIGINS = ['endocraft.app', 'endocraft-production.up.railway.app', 'localhost'];
+function isAllowedOrigin(req) {
+  const src = req.headers.origin || req.headers.referer || '';
+  if (!src) return false;
+  try {
+    const host = new URL(src).hostname;
+    return ALLOWED_IMAGE_ORIGINS.some(h => host === h || host.endsWith('.' + h));
+  } catch (e) { return false; }
+}
+
+// Lightweight in-memory per-IP rate-limiter for the ungated image engine.
+const _imgHits = new Map();
+function imageRateOk(req, limit = 40, windowMs = 60000) {
+  const ip = String(req.headers['x-forwarded-for'] || (req.socket && req.socket.remoteAddress) || 'unknown').split(',')[0].trim();
+  const now = Date.now();
+  const rec = _imgHits.get(ip);
+  if (!rec || now - rec.start > windowMs) { _imgHits.set(ip, { start: now, count: 1 }); return true; }
+  rec.count++;
+  if (_imgHits.size > 5000) { for (const [k, v] of _imgHits) if (now - v.start > windowMs) _imgHits.delete(k); }
+  return rec.count <= limit;
+}
+
 // ─── Resend Email-Integration (prepared 2026-06-16, refactored 2026-06-16) ───
 // Activates only when RESEND_API_KEY is set. Until then: all email-functions are no-op.
 // Uses Resend's REST API directly via fetch — no SDK dependency.
@@ -672,6 +709,46 @@ app.get('/api/credits', async (req, res) => {
     const rows = await r.json();
     if (!Array.isArray(rows) || !rows.length || rows[0].active === false) return res.status(404).json({ ok: false, error: 'invalid code' });
     res.json({ ok: true, credits: rows[0].credits | 0 });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// POST /api/admin/set-credits — Admin: Guthaben eines Accounts/Codes anpassen.
+//   Body:  { code, amount }   → addiert amount (kann negativ sein) via add_credits RPC
+//     ODER { code, set }       → setzt absoluten Kontostand
+//     optional: { active: true|false }  Code aktivieren/sperren
+//               { create: true }        Code anlegen, falls nicht vorhanden
+//   Auth: ADMIN_KEY (?key=... ODER Header x-admin-key). → { ok, code, credits }
+app.post('/api/admin/set-credits', async (req, res) => {
+  if (!checkAdminKey(req, res)) return;
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase not configured' });
+  const code = String(req.body?.code || '').toUpperCase().trim();
+  if (!/^[A-Z0-9-]{4,40}$/.test(code)) return res.status(400).json({ ok: false, error: 'valid code required' });
+  const hdr = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' };
+  const enc = encodeURIComponent(code);
+  try {
+    // Existenz prüfen (optional anlegen)
+    const look = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/beta_codes?code=eq.${enc}&select=code&limit=1`, { headers: hdr });
+    const rows = await look.json();
+    if (!(Array.isArray(rows) && rows.length)) {
+      if (req.body?.create !== true) return res.status(404).json({ ok: false, error: 'code not found (pass create:true to create it)' });
+      await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/beta_codes`, { method: 'POST', headers: { ...hdr, 'Prefer': 'return=minimal' }, body: JSON.stringify({ code, credits: 0, active: true }) });
+    }
+    if (typeof req.body?.active === 'boolean') {
+      await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/beta_codes?code=eq.${enc}`, { method: 'PATCH', headers: { ...hdr, 'Prefer': 'return=minimal' }, body: JSON.stringify({ active: req.body.active }) });
+    }
+    // Absoluter Wert (set) hat Vorrang, sonst Delta (amount)
+    if (req.body?.set !== undefined && req.body?.set !== null) {
+      const val = Math.floor(Number(req.body.set));
+      if (!Number.isFinite(val) || val < 0) return res.status(400).json({ ok: false, error: 'set must be a number >= 0' });
+      const p = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/beta_codes?code=eq.${enc}`, { method: 'PATCH', headers: { ...hdr, 'Prefer': 'return=representation' }, body: JSON.stringify({ credits: val }) });
+      const out = await p.json();
+      return res.json({ ok: true, code, credits: (Array.isArray(out) && out.length) ? (out[0].credits | 0) : val });
+    }
+    const amount = Math.floor(Number(req.body?.amount));
+    if (!Number.isFinite(amount) || amount === 0) return res.status(400).json({ ok: false, error: 'provide a nonzero amount, or set' });
+    const bal = await addCredits(code, amount);
+    if (bal < 0) return res.status(500).json({ ok: false, error: 'could not adjust credits' });
+    return res.json({ ok: true, code, credits: bal });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
@@ -1515,6 +1592,9 @@ const QUALITY_LOCK_SUFFIX = ', NO anime style, NO oil painting roughness, NO def
 
 app.post('/api/image', async (req, res) => {
   try {
+    // Access-Gate: internal key OR same-origin browser tool. Blocks external scripts burning AIML funds.
+    if (!hasInternalKey(req) && !isAllowedOrigin(req)) return res.status(403).json({ error: 'forbidden' });
+    if (!imageRateOk(req)) return res.status(429).json({ error: 'rate limit exceeded' });
     const { prompt, model = 'flux-pro', width, height, aspect_ratio, quality_lock } = req.body;
     if (!prompt) return res.status(400).json({ error: 'Prompt required' });
     // Quality-Lock per default ON für character/NPC-style assets, deaktivierbar via quality_lock:false
@@ -1883,14 +1963,19 @@ app.post('/api/video', async (req, res) => {
     if (!image_url && !prompt) return res.status(400).json({ error: 'image_url or prompt required' });
     // Server-autoritative Abbuchung: 1 Clip = 4 Credits, vor Job-Start.
     const VIDEO_COST = 8;
+    const internal = hasInternalKey(req);
     const codeC = String(code || '').toUpperCase().trim();
-    if (!codeC) return res.status(401).json({ error: 'code required' });
-    const spend = await spendCredits(codeC, VIDEO_COST);
-    if (spend.status !== 'ok') {
-      if (spend.status === 'insufficient') return res.status(402).json({ error: 'Not enough credits', status: spend.status, balance: spend.balance });
-      if (spend.status === 'inactive') return res.status(403).json({ error: 'This code is no longer active', status: spend.status });
-      if (spend.status === 'invalid') return res.status(403).json({ error: 'Invalid code', status: spend.status });
-      return res.status(500).json({ error: 'Could not charge credits' });
+    let spendBalance = null;
+    if (!internal) {
+      if (!codeC) return res.status(401).json({ error: 'code required' });
+      const spend = await spendCredits(codeC, VIDEO_COST);
+      if (spend.status !== 'ok') {
+        if (spend.status === 'insufficient') return res.status(402).json({ error: 'Not enough credits', status: spend.status, balance: spend.balance });
+        if (spend.status === 'inactive') return res.status(403).json({ error: 'This code is no longer active', status: spend.status });
+        if (spend.status === 'invalid') return res.status(403).json({ error: 'Invalid code', status: spend.status });
+        return res.status(500).json({ error: 'Could not charge credits' });
+      }
+      spendBalance = spend.balance;
     }
     const body = { model };
     if (prompt) body.prompt = prompt;
@@ -1906,10 +1991,10 @@ app.post('/api/video', async (req, res) => {
     const data = await r.json().catch(() => ({}));
     console.log('[video] create:', JSON.stringify(data).substring(0, 300));
     if (!r.ok || data.error) {
-      await addCredits(codeC, VIDEO_COST); // Job nicht gestartet → zurückbuchen
+      if (!internal && codeC) await addCredits(codeC, VIDEO_COST); // Job nicht gestartet → zurückbuchen
       return res.status(r.status >= 400 ? r.status : 500).json({ error: data.error || ('HTTP ' + r.status), raw: data });
     }
-    return res.json({ id: data.id, status: data.status, balance: spend.balance });
+    return res.json({ id: data.id, status: data.status, balance: spendBalance });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
