@@ -1955,7 +1955,8 @@ const IMAGE_PROXY_ALLOWED_HOSTS = [
   'replicate.delivery', 'replicate.com',
   'fal.media', 'fal.ai',
   'storage.googleapis.com', 'amazonaws.com',
-  'blob.core.windows.net', 'bytedance.com', 'volccdn.com', 'volces.com'
+  'blob.core.windows.net', 'bytedance.com', 'volccdn.com', 'volces.com',
+  'etsystatic.com'
 ];
 app.get('/api/image/proxy', async (req, res) => {
   try {
