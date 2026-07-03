@@ -141,42 +141,30 @@ Unsubscribe: https://endocraft-production.up.railway.app/unsubscribe?token=${uns
 function emailTemplate2ProTip(unsubToken) {
   return `Hey,
 
-Quick one.
+Short one, and it's a gift.
 
-Something that took me embarrassingly long to figure out as a DM: an NPC doesn't need a voice. They need three sentences you can deliver consistently.
+Last week our Discord produced an idea too stupid to ignore: the invasive garden slug — as a D&D boss. So I built him properly. Full statblock, a three-day siege structure, and a no-combat path that involves every barrel of beer in the village.
 
-The format I steal from sitcom writers:
+SLUGLORD, LORD OF SLUGS
+- CR 8 · 310 HP · AC 9 (he is a slug)
+- Speed: 5 feet per round. Nothing can increase it. Nothing needs to.
+- Your party gets three days of warning. That IS the adventure.
 
-1. ONE physical tic the players will see every time
-   ("constantly polishes a coin", "never makes eye contact", "rubs the scar on her wrist")
+Grab the free 4-page one-shot here:
+https://endocraft.app/free/sluglord/?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_2_sluglord
 
-2. ONE verbal habit
-   ("calls everyone 'friend' even when threatening", "starts every sentence with 'See, the thing is...'", "ends statements with a question")
+Run him as comic relief between heavy sessions — but play him dead serious at the table. The players will supply the laughter. Around day two, they'll stop.
 
-3. ONE thing they want from this scene
-   ("wants the party to leave so he can drink", "wants to impress them", "wants to find out who sent them")
-
-That's the entire NPC at the table level. The traits doc inside the free pack is built around exactly this — I put the physical tic, the verbal habit, and the want in three short lines.
-
-Try it on the next NPC you run. Even if everything else falls apart, those three things hold the character together.
-
-If you're prepping a specific session this week, hit reply with the adventure or scene — I'll write you three sentences in this format for a key NPC. Free, no catch. I just like writing them.
+If you run it: hit reply and tell me how your table handled him. Beer-moat stories especially welcome.
 
 Roll high,
 Marco
 
 ---
 
-P.S. — One concrete example using a name from the free pack:
+P.S. — If your table enjoys villains with more teeth and fewer antennae, the premium encounter kits are on Etsy (WELCOME10 works):
+https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_2
 
-Thalon Greycloak (Old Mercenary)
-- Constantly checks his blind side, like he's expecting an ambush
-- Calls every younger person "kid", even nobles
-- Wants someone — anyone — to admit the war wasn't worth it
-
-You can run him in any tavern scene right now.
-
-Browse premium packs on Etsy: https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_2
 Unsubscribe: https://endocraft-production.up.railway.app/unsubscribe?token=${unsubToken}`;
 }
 
@@ -207,7 +195,7 @@ MAGIC ITEMS (2)
 
 PLUS 13 atmospheric mood pieces for session-opener slides
 
-All 1800x2400 PNG, Roll20 + Foundry + Owlbear Rodeo ready. €14.99 on Etsy, less than a single VTT subscription month.
+All 1800x2400 PNG, Roll20 + Foundry + Owlbear Rodeo ready. $14.99 on Etsy, less than a single VTT subscription month.
 
 I built it because when I ran my first CoS table, I wasted three sessions of prep time hunting for "good enough" NPC art that didn't look like 2015 stock photos. This pack is what I wish I'd had on day one.
 
@@ -228,6 +216,58 @@ P.S. — If you read this all the way to here and you're NOT a DM but just curio
 Unsubscribe: https://endocraft-production.up.railway.app/unsubscribe?token=${unsubToken}`;
 }
 
+
+// ─── HTML-E-Mail-Layout (EndoCraft-Design: Pergament, Maroon, Gold) ───
+function emailHtmlWrap(bodyHtml, unsubToken) {
+  return `<!DOCTYPE html><html><body style="margin:0;padding:24px 8px;background:#efe9dc;font-family:Georgia,serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fbf1dd;border-radius:8px;overflow:hidden;">
+<tr><td style="background:#6b1717;padding:18px 28px;color:#f3e6c8;font-size:17px;letter-spacing:5px;font-weight:bold;font-family:Georgia,serif;">ENDO<span style="color:#d8b46a;">CRAFT</span></td></tr>
+${bodyHtml}
+<tr><td style="padding:16px 30px 22px;font-size:12px;color:#8a7a5c;text-align:center;border-top:1px solid #e3d2ac;">EndoCraft &middot; <a href="https://endocraft.app" style="color:#8a7a5c;">endocraft.app</a> &middot; <a href="https://endocraft-production.up.railway.app/unsubscribe?token=${unsubToken}" style="color:#8a7a5c;">Unsubscribe</a></td></tr>
+</table></td></tr></table></body></html>`;
+}
+const EMAIL_BTN = (href, label, gold) => `<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:20px auto;"><tr><td style="background:${gold ? '#b98a2e' : '#6b1717'};border-radius:6px;"><a href="${href}" style="display:inline-block;padding:12px 30px;color:${gold ? '#241c12' : '#f3e6c8'};text-decoration:none;font-weight:bold;letter-spacing:1px;font-family:Georgia,serif;">${label}</a></td></tr></table>`;
+const EMAIL_TD = (inner) => `<tr><td style="padding:26px 30px;font-size:16px;line-height:1.6;color:#241c12;font-family:Georgia,serif;">${inner}</td></tr>`;
+
+function emailHtml1(unsubToken) {
+  return emailHtmlWrap(EMAIL_TD(`
+<h1 style="font-size:20px;color:#6b1717;margin:0 0 16px;">Your NPC pack is ready.</h1>
+<p>Hey,</p>
+<p>thanks for grabbing the free pack. Inside the ZIP:</p>
+<ul style="padding-left:20px;"><li>5 high-res NPC portraits (1800&times;2400 PNG)</li><li>Quick-reference doc &mdash; names, traits, plot hooks</li><li>A README with how I&rsquo;d run each one</li></ul>
+${EMAIL_BTN('https://endocraft.app/free/endocraft-free-pack.zip','Download the Free Pack',false)}
+<p><b>Two things to know:</b> Every face was reviewed by me before going in &mdash; AI does the heavy lifting (Seedream 4.5), I keep the janky hands and uncanny stares out. And: no newsletter shotgun. A couple more useful emails, then silence. Unsubscribe kills it forever, no hard feelings.</p>
+<p>If you&rsquo;ve got a sec: <b>what adventure are you running next?</b> I read every reply and build from them.</p>
+<p style="margin-top:20px;">Roll high,<br><b>Marco</b></p>
+<div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:20px;"><b>P.S.</b> &mdash; <b>WELCOME10</b> gets you 10% off any premium pack on <a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1" style="color:#6b1717;">Etsy</a>. No pressure, just FYI.</div>
+`), unsubToken);
+}
+
+function emailHtml2(unsubToken) {
+  return emailHtmlWrap(`<tr><td><a href="https://endocraft.app/free/sluglord/?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_2_sluglord"><img src="https://endocraft.app/free/sluglord/sluglord-wide.jpg" width="600" alt="Sluglord crests the hill above a torchlit village" style="width:100%;display:block;border:0;"></a></td></tr>` + EMAIL_TD(`
+<h1 style="font-size:20px;color:#6b1717;margin:0 0 16px;">Short one, and it&rsquo;s a gift.</h1>
+<p>Last week our Discord produced an idea too stupid to ignore: the invasive garden slug &mdash; as a D&amp;D boss. So I built him properly. Full statblock, a three-day siege, and a no-combat path involving every barrel of beer in the village.</p>
+<p style="text-align:center;letter-spacing:2px;"><b>SLUGLORD, LORD OF SLUGS</b><br>CR 8 &middot; 310 HP &middot; AC 9 <i>(he is a slug)</i><br><b>Speed: 5 feet per round.</b> Nothing can increase it. Nothing needs to.</p>
+${EMAIL_BTN('https://endocraft.app/free/sluglord/?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_2_sluglord','Get the Free One-Shot (PDF)',true)}
+<p>Play him dead serious at the table. The players will supply the laughter. Around day two, they&rsquo;ll stop.</p>
+<p>If you run it: hit reply and tell me how your table handled him. Beer-moat stories especially welcome.</p>
+<p style="margin-top:20px;">Roll high,<br><b>Marco</b></p>
+`), unsubToken);
+}
+
+function emailHtml3(unsubToken) {
+  return emailHtmlWrap(EMAIL_TD(`
+<h1 style="font-size:20px;color:#6b1717;margin:0 0 16px;">Last email for a while &mdash; as promised.</h1>
+<p>A few people told me they&rsquo;re running <b>Curse of Strahd</b>. If that&rsquo;s you, here&rsquo;s what I built for it.</p>
+<p>The <b>CoS Master Pack</b>: 39 assets &mdash; 12 NPC portraits (Strahd, Ireena, Madam Eva, Van Richten &hellip;), 8 locations (Castle Ravenloft, Svalich Road &hellip;), 4 grid battle maps, 2 magic items, 13 mood pieces. Roll20, Foundry &amp; Owlbear ready. $14.99 &mdash; less than a single VTT subscription month.</p>
+<p>I built it because on my first CoS table I wasted three sessions hunting for art that didn&rsquo;t look like 2015 stock photos. This is what I wish I&rsquo;d had on day one.</p>
+${EMAIL_BTN('https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_3_cos','See the Pack on Etsy — WELCOME10 for 10% off',false)}
+<p>Not running CoS? Ignore this and good luck with whatever you&rsquo;re running. Either way &mdash; thanks for grabbing the free pack.</p>
+<p style="margin-top:20px;">Roll high,<br><b>Marco</b></p>
+`), unsubToken);
+}
+
 // Send a welcome-email via Resend REST API · no-op if Resend not configured
 async function sendWelcomeEmail(emailNumber, lead) {
   if (!resendActive) {
@@ -236,7 +276,7 @@ async function sendWelcomeEmail(emailNumber, lead) {
   }
   const subjects = {
     1: 'Your D&D NPC pack is ready (and what\'s inside)',
-    2: 'A trick I use to make NPC voices stick at the table',
+    2: 'A free boss for your table. He is in no hurry.',
     3: 'If you\'re prepping Curse of Strahd next...'
   };
   const templates = {
@@ -244,6 +284,7 @@ async function sendWelcomeEmail(emailNumber, lead) {
     2: emailTemplate2ProTip,
     3: emailTemplate3CoSHint
   };
+  const htmlTemplates = { 1: emailHtml1, 2: emailHtml2, 3: emailHtml3 };
   const tmplFn = templates[emailNumber];
   if (!tmplFn) {
     console.warn(`[email] Unknown emailNumber: ${emailNumber}`);
@@ -262,7 +303,8 @@ async function sendWelcomeEmail(emailNumber, lead) {
         from: RESEND_FROM,
         to: [lead.email],
         subject: subjects[emailNumber],
-        text
+        text,
+        html: htmlTemplates[emailNumber] ? htmlTemplates[emailNumber](lead.unsubscribe_token) : undefined
       })
     });
     if (!sendRes.ok) {
@@ -3872,6 +3914,23 @@ app.get('/api/wishes', async (req, res) => {
   }
 });
 
+// ─── Public: freie Free-Pack-Plaetze (Counter auf /free) · 60s-Cache ───
+let _slotsCache = { t: 0, data: null };
+app.get('/api/free-slots', async (req, res) => {
+  try {
+    if (_slotsCache.data && Date.now() - _slotsCache.t < 60000) return res.json(_slotsCache.data);
+    if (!SUPABASE_URL || !SUPABASE_KEY) return res.json({ total: 50, left: null });
+    const r = await fetchWithTimeout(`${SUPABASE_URL}/rest/v1/free_pack_leads?select=id&source=neq.direct&limit=1`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Prefer': 'count=exact', 'Range': '0-0' }
+    });
+    const cr = r.headers.get('content-range') || '';
+    const taken = parseInt(cr.split('/')[1] || '0', 10) || 0;
+    const data = { total: 50, taken, left: Math.max(0, 50 - taken) };
+    _slotsCache = { t: Date.now(), data };
+    res.json(data);
+  } catch (e) { res.json({ total: 50, left: null }); }
+});
+
 app.get('/api/free-pack/stats', async (req, res) => {
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
   if (!checkAdminKey(req, res)) return;
@@ -4127,7 +4186,7 @@ app.get('/api/welcome-emails/cron-tick', async (req, res) => {
       }
     }
     // Email 2: T+3d, sent_at_1 set, sent_at_2 null, not unsubscribed
-    const url2 = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,unsubscribe_token,email_1_sent_at&email_1_sent_at=not.is.null&email_2_sent_at=is.null&unsubscribed_at=is.null&email_1_sent_at=lt.${encodeURIComponent(new Date(Date.now() - 3*24*60*60*1000).toISOString())}&limit=50`;
+    const url2 = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,unsubscribe_token,email_1_sent_at&email_1_sent_at=not.is.null&email_2_sent_at=is.null&unsubscribed_at=is.null&email_1_sent_at=lt.${encodeURIComponent(new Date(Date.now() - 2*24*60*60*1000).toISOString())}&limit=50`;
     const r2 = await fetchWithTimeout(url2, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
     if (r2.ok) {
       const leads2 = await r2.json();
