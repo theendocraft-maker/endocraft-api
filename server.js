@@ -4113,8 +4113,19 @@ app.get('/api/welcome-emails/cron-tick', async (req, res) => {
   if (!checkAdminKey(req, res)) return;
   if (!SUPABASE_URL || !SUPABASE_KEY) return res.status(500).json({ error: 'Supabase missing' });
   if (!resendActive) return res.json({ ok: true, skipped: true, reason: 'RESEND_API_KEY not set' });
-  const results = { email_2_sent: 0, email_3_sent: 0, errors: [] };
+  const results = { email_1_sent: 0, email_2_sent: 0, email_3_sent: 0, errors: [] };
   try {
+    // Email 1 backfill: leads who signed up before Resend was configured (email_1 never fired on signup)
+    const url1 = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,unsubscribe_token&email_1_sent_at=is.null&unsubscribed_at=is.null&limit=50`;
+    const r1 = await fetchWithTimeout(url1, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
+    if (r1.ok) {
+      const leads1 = await r1.json();
+      for (const lead of leads1) {
+        const result = await sendWelcomeEmail(1, lead);
+        if (result.ok) results.email_1_sent++;
+        else results.errors.push({ leadId: lead.id, emailNum: 1, error: result.error });
+      }
+    }
     // Email 2: T+3d, sent_at_1 set, sent_at_2 null, not unsubscribed
     const url2 = `${SUPABASE_URL}/rest/v1/free_pack_leads?select=id,email,unsubscribe_token,email_1_sent_at&email_1_sent_at=not.is.null&email_2_sent_at=is.null&unsubscribed_at=is.null&email_1_sent_at=lt.${encodeURIComponent(new Date(Date.now() - 3*24*60*60*1000).toISOString())}&limit=50`;
     const r2 = await fetchWithTimeout(url2, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
