@@ -246,13 +246,14 @@ const EMAIL_TD = (inner) => `<tr><td class="ec-td" style="padding:28px 32px;font
 
 function emailHtml1(unsubToken) {
   return emailHtmlWrap(`<tr><td><a href="https://endocraft.app/free/"><img src="https://endocraft.app/free/shop/free-pack.jpg" width="600" alt="The Free NPC Pack — 5 cinematic D&amp;D portraits" style="width:100%;display:block;border:0;"></a></td></tr>` + EMAIL_TD(`
-<h1 style="font-size:20px;color:#8a5e1e;margin:0 0 16px;">Your NPC pack is ready.</h1>
+<h1 style="font-size:20px;color:#8a5e1e;margin:0 0 16px;">Your cutscene is in the works.</h1>
 <p>Hey,</p>
-<p>thanks for grabbing the free pack. Inside the ZIP:</p>
-<ul style="padding-left:20px;"><li>5 high-res NPC portraits (1800&times;2400 PNG)</li><li>Quick-reference doc &mdash; names, traits, plot hooks</li><li>A README with how I&rsquo;d run each one</li></ul>
-${EMAIL_BTN('https://endocraft.app/free/endocraft-free-pack.zip','Download the Free Pack',false)}
-<p><b>Two things to know:</b> Every face was reviewed by me before going in &mdash; AI does the heavy lifting (Seedream 4.5), I keep the janky hands and uncanny stares out. And: no newsletter shotgun. A couple more useful emails, then silence. Unsubscribe kills it forever, no hard feelings.</p>
-<p>If you&rsquo;ve got a sec: <b>what adventure are you running next?</b> I read every reply and build from them.</p>
+<p>thanks for signing up &mdash; I&rsquo;m personally crafting a cinematic cutscene of your character. It&rsquo;ll land in your inbox within the next few days.</p>
+<p><i>Haven&rsquo;t told me who it should star yet?</i> Just hit reply with a name and a one-line description (e.g. &ldquo;Krull, a scarred half-orc barbarian&rdquo;) and I&rsquo;ll build from it.</p>
+<p><b>While you wait &mdash; here&rsquo;s a free gift:</b> a 5-portrait NPC pack to drop straight into your next session.</p>
+${EMAIL_BTN('https://endocraft.app/free/endocraft-free-pack.zip','Download the NPC Pack',true)}
+<p style="font-size:15px;color:#5c5240;"><i>Inside the ZIP: 5 high-res portraits, a quick-reference doc with names, traits &amp; plot hooks, and a README on how I&rsquo;d run each one.</i></p>
+<p><b>Two things to know:</b> every asset is reviewed by me before it goes out &mdash; AI does the heavy lifting (Seedream 4.5), I keep the janky hands out. And no newsletter shotgun: a couple more useful emails, then silence. Unsubscribe kills it forever, no hard feelings.</p>
 <p style="margin-top:20px;">Roll high,<br><b>Marco</b></p>
 <div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:20px;"><b>P.S.</b> &mdash; <b>WELCOME10</b> gets you 10% off any premium pack on <a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1" style="color:#8a5e1e;">Etsy</a>. No pressure, just FYI.</div>
 `), unsubToken);
