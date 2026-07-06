@@ -219,20 +219,34 @@ Unsubscribe: https://endocraft-production.up.railway.app/unsubscribe?token=${uns
 
 // ─── HTML-E-Mail-Layout (EndoCraft-Design: Pergament, Maroon, Gold) ───
 function emailHtmlWrap(bodyHtml, unsubToken) {
-  return `<!DOCTYPE html><html><body style="margin:0;padding:24px 8px;background:#efe9dc;font-family:Georgia,serif;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
-<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fbf1dd;border-radius:8px;overflow:hidden;">
-<tr><td style="background:#6b1717;padding:18px 28px;color:#f3e6c8;font-size:17px;letter-spacing:5px;font-weight:bold;font-family:Georgia,serif;">ENDO<span style="color:#d8b46a;">CRAFT</span></td></tr>
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="x-apple-disable-message-reformatting"><link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=EB+Garamond:ital@0;1&display=swap" rel="stylesheet"><style>
+body{margin:0;padding:0;}
+img{max-width:100%;height:auto;}
+.cinzel{font-family:'Cinzel',Georgia,serif;}
+@media only screen and (max-width:600px){
+  .ec-outer-pad{padding:10px 6px !important;}
+  .ec-td{padding:22px 18px !important;}
+  .ec-hd{padding:16px 18px !important;}
+  .ec-ft{padding:16px 18px 20px !important;}
+}
+</style></head><body style="margin:0;padding:0;background:#e7e0d0;font-family:'EB Garamond',Georgia,serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#e7e0d0;"><tr><td align="center" class="ec-outer-pad" style="padding:24px 8px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#fbf3e2;border:1px solid #e3d2ac;border-radius:12px;overflow:hidden;">
+<tr><td class="ec-hd" style="background:#10131c;padding:16px 28px;" align="left">
+<table role="presentation" cellpadding="0" cellspacing="0"><tr>
+<td style="padding-right:12px;vertical-align:middle;"><img src="https://endocraft.app/assets/logo-seal.png" width="40" height="40" alt="EndoCraft" style="display:block;border:0;width:40px;height:40px;border-radius:50%;"></td>
+<td style="vertical-align:middle;" class="cinzel"><span style="font-size:20px;letter-spacing:6px;color:#f3edd9;font-weight:700;">ENDO<span style="color:#d8b46a;">CRAFT</span></span></td>
+</tr></table></td></tr>
 ${bodyHtml}
-<tr><td style="padding:16px 30px 22px;font-size:12px;color:#8a7a5c;text-align:center;border-top:1px solid #e3d2ac;">EndoCraft &middot; <a href="https://endocraft.app" style="color:#8a7a5c;">endocraft.app</a> &middot; <a href="https://endocraft-production.up.railway.app/unsubscribe?token=${unsubToken}" style="color:#8a7a5c;">Unsubscribe</a></td></tr>
+<tr><td class="ec-ft" style="padding:18px 32px 24px;font-size:12px;color:#8a7a5c;text-align:center;border-top:1px solid #e3d2ac;font-family:'EB Garamond',Georgia,serif;">EndoCraft &middot; <a href="https://endocraft.app" style="color:#8a5e1e;text-decoration:none;">endocraft.app</a> &middot; <a href="https://endocraft-production.up.railway.app/unsubscribe?token=${unsubToken}" style="color:#8a7a5c;">Unsubscribe</a></td></tr>
 </table></td></tr></table></body></html>`;
 }
-const EMAIL_BTN = (href, label, gold) => `<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:20px auto;"><tr><td style="background:${gold ? '#b98a2e' : '#6b1717'};border-radius:6px;"><a href="${href}" style="display:inline-block;padding:12px 30px;color:${gold ? '#241c12' : '#f3e6c8'};text-decoration:none;font-weight:bold;letter-spacing:1px;font-family:Georgia,serif;">${label}</a></td></tr></table>`;
-const EMAIL_TD = (inner) => `<tr><td style="padding:26px 30px;font-size:16px;line-height:1.6;color:#241c12;font-family:Georgia,serif;">${inner}</td></tr>`;
+const EMAIL_BTN = (href, label, gold) => `<table role="presentation" cellpadding="0" cellspacing="0" align="center" style="margin:24px auto;"><tr><td style="background:${gold ? '#c39a3f' : '#10131c'};border-radius:6px;"><a href="${href}" class="cinzel" style="display:inline-block;padding:13px 32px;color:${gold ? '#211a0e' : '#f3edd9'};text-decoration:none;font-weight:700;letter-spacing:1px;font-size:14px;">${label}</a></td></tr></table>`;
+const EMAIL_TD = (inner) => `<tr><td class="ec-td" style="padding:28px 32px;font-size:17px;line-height:1.65;color:#2b2318;font-family:'EB Garamond',Georgia,serif;">${inner}</td></tr>`;
 
 function emailHtml1(unsubToken) {
-  return emailHtmlWrap(EMAIL_TD(`
-<h1 style="font-size:20px;color:#6b1717;margin:0 0 16px;">Your NPC pack is ready.</h1>
+  return emailHtmlWrap(`<tr><td><a href="https://endocraft.app/free/"><img src="https://endocraft.app/free/shop/free-pack.jpg" width="600" alt="The Free NPC Pack — 5 cinematic D&amp;D portraits" style="width:100%;display:block;border:0;"></a></td></tr>` + EMAIL_TD(`
+<h1 style="font-size:20px;color:#8a5e1e;margin:0 0 16px;">Your NPC pack is ready.</h1>
 <p>Hey,</p>
 <p>thanks for grabbing the free pack. Inside the ZIP:</p>
 <ul style="padding-left:20px;"><li>5 high-res NPC portraits (1800&times;2400 PNG)</li><li>Quick-reference doc &mdash; names, traits, plot hooks</li><li>A README with how I&rsquo;d run each one</li></ul>
@@ -240,13 +254,13 @@ ${EMAIL_BTN('https://endocraft.app/free/endocraft-free-pack.zip','Download the F
 <p><b>Two things to know:</b> Every face was reviewed by me before going in &mdash; AI does the heavy lifting (Seedream 4.5), I keep the janky hands and uncanny stares out. And: no newsletter shotgun. A couple more useful emails, then silence. Unsubscribe kills it forever, no hard feelings.</p>
 <p>If you&rsquo;ve got a sec: <b>what adventure are you running next?</b> I read every reply and build from them.</p>
 <p style="margin-top:20px;">Roll high,<br><b>Marco</b></p>
-<div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:20px;"><b>P.S.</b> &mdash; <b>WELCOME10</b> gets you 10% off any premium pack on <a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1" style="color:#6b1717;">Etsy</a>. No pressure, just FYI.</div>
+<div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:20px;"><b>P.S.</b> &mdash; <b>WELCOME10</b> gets you 10% off any premium pack on <a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1" style="color:#8a5e1e;">Etsy</a>. No pressure, just FYI.</div>
 `), unsubToken);
 }
 
 function emailHtml2(unsubToken) {
   return emailHtmlWrap(`<tr><td><a href="https://endocraft.app/free/sluglord/?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_2_sluglord"><img src="https://endocraft.app/free/sluglord/sluglord-wide.jpg" width="600" alt="Sluglord crests the hill above a torchlit village" style="width:100%;display:block;border:0;"></a></td></tr>` + EMAIL_TD(`
-<h1 style="font-size:20px;color:#6b1717;margin:0 0 16px;">Short one, and it&rsquo;s a gift.</h1>
+<h1 style="font-size:20px;color:#8a5e1e;margin:0 0 16px;">Short one, and it&rsquo;s a gift.</h1>
 <p>Last week our Discord produced an idea too stupid to ignore: the invasive garden slug &mdash; as a D&amp;D boss. So I built him properly. Full statblock, a three-day siege, and a no-combat path involving every barrel of beer in the village.</p>
 <p style="text-align:center;letter-spacing:2px;"><b>SLUGLORD, LORD OF SLUGS</b><br>CR 8 &middot; 310 HP &middot; AC 9 <i>(he is a slug)</i><br><b>Speed: 5 feet per round.</b> Nothing can increase it. Nothing needs to.</p>
 ${EMAIL_BTN('https://endocraft.app/free/sluglord/?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_2_sluglord','Get the Free One-Shot (PDF)',true)}
@@ -257,8 +271,8 @@ ${EMAIL_BTN('https://endocraft.app/free/sluglord/?utm_source=endocraft&utm_mediu
 }
 
 function emailHtml3(unsubToken) {
-  return emailHtmlWrap(EMAIL_TD(`
-<h1 style="font-size:20px;color:#6b1717;margin:0 0 16px;">Last email for a while &mdash; as promised.</h1>
+  return emailHtmlWrap(`<tr><td><a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_3_cos"><img src="https://endocraft.app/free/shop/cos-master.jpg" width="600" alt="Curse of Strahd Master Pack — 39 cinematic D&amp;D assets" style="width:100%;display:block;border:0;"></a></td></tr>` + EMAIL_TD(`
+<h1 style="font-size:20px;color:#8a5e1e;margin:0 0 16px;">Last email for a while &mdash; as promised.</h1>
 <p>A few people told me they&rsquo;re running <b>Curse of Strahd</b>. If that&rsquo;s you, here&rsquo;s what I built for it.</p>
 <p>The <b>CoS Master Pack</b>: 39 assets &mdash; 12 NPC portraits (Strahd, Ireena, Madam Eva, Van Richten &hellip;), 8 locations (Castle Ravenloft, Svalich Road &hellip;), 4 grid battle maps, 2 magic items, 13 mood pieces. Roll20, Foundry &amp; Owlbear ready. $14.99 &mdash; less than a single VTT subscription month.</p>
 <p>I built it because on my first CoS table I wasted three sessions hunting for art that didn&rsquo;t look like 2015 stock photos. This is what I wish I&rsquo;d had on day one.</p>
