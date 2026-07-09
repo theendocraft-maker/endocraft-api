@@ -1671,6 +1671,17 @@ app.post('/api/image', async (req, res) => {
         console.log(`[seedream] auto-scaling ${w}x${h} (${w*h}px) → ${newW}x${newH} (${newW*newH}px) to meet 3.686.400 minimum`);
         w = newW; h = newH;
       }
+      // Seedream 5.0 Pro deckelt total pixels bei 4.227.072 — bei Überschreitung runterskalieren (4.5/Lite haben höheres Limit)
+      if (model.includes('5-0-pro')) {
+        const MAX_PX = 4227072;
+        if (w * h > MAX_PX) {
+          const scale = Math.sqrt(MAX_PX / (w * h));
+          const capW = Math.floor(w * scale);
+          const capH = Math.floor(h * scale);
+          console.log(`[seedream-pro] capping ${w}x${h} (${w*h}px) → ${capW}x${capH} (${capW*capH}px) to stay under 4.227.072 maximum`);
+          w = capW; h = capH;
+        }
+      }
       body.image_size = { width: Math.max(w, 1440), height: Math.max(h, 1440) };
     } else if (model.includes('imagen')) {
       body.aspect_ratio = aspect_ratio || '3:4';
@@ -1678,6 +1689,8 @@ app.post('/api/image', async (req, res) => {
       if (width) body.width = width;
       if (height) body.height = height;
     }
+    // Seedream 5.0 Pro ist langsamer als 45s — längeres Timeout, sonst bricht der Server ab bevor Pro fertig ist
+    const imgTimeout = model.includes('5-0-pro') ? 120000 : 45000;
     const response = await fetchWithTimeout('https://api.aimlapi.com/v1/images/generations', {
       method: 'POST',
       headers: {
@@ -1685,7 +1698,7 @@ app.post('/api/image', async (req, res) => {
         'Authorization': `Bearer ${AIML_KEY}`
       },
       body: JSON.stringify(body)
-    });
+    }, imgTimeout);
     const data = await response.json();
     console.log('AIML response:', JSON.stringify(data).substring(0, 300));
     if (data.error) return res.status(500).json({ error: data.error });
