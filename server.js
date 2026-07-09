@@ -1652,7 +1652,7 @@ app.post('/api/image', async (req, res) => {
     // Access-Gate: internal key OR same-origin browser tool. Blocks external scripts burning AIML funds.
     if (!hasInternalKey(req) && !isAllowedOrigin(req)) return res.status(403).json({ error: 'forbidden' });
     if (!imageRateOk(req)) return res.status(429).json({ error: 'rate limit exceeded' });
-    const { prompt, model = 'flux-pro', width, height, aspect_ratio, quality_lock } = req.body;
+    const { prompt, model = 'flux-pro', width, height, aspect_ratio, quality_lock, image_size } = req.body;
     if (!prompt) return res.status(400).json({ error: 'Prompt required' });
     // Quality-Lock per default ON für character/NPC-style assets, deaktivierbar via quality_lock:false
     const useLock = quality_lock !== false;
@@ -1660,8 +1660,11 @@ app.post('/api/image', async (req, res) => {
     const body = { model, prompt: lockedPrompt };
     if (model.includes('grok')) {
       body.aspect_ratio = aspect_ratio || '2:3';
+    } else if (model.includes('5-0-pro')) {
+      // Seedream 5.0 Pro nutzt native Größen-Presets ("1.5K"/"2K") als String — NICHT das erzwungene Großobjekt (das ist Pros langsamster Modus / hängt).
+      body.image_size = (typeof image_size === 'string' && ['1.5K','2K'].includes(image_size)) ? image_size : '2K';
     } else if (model.includes('seedream')) {
-      // Seedream-4.5 verlangt mindestens 3.686.400 Pixel — bei kleinerem Input auto-skalieren statt teurer Call der failed
+      // Seedream-4.5 / 5.0-Lite verlangen mindestens 3.686.400 Pixel — bei kleinerem Input auto-skalieren statt teurer Call der failed
       let w = width || 2048, h = height || 2048;
       const MIN_PX = 3686400;
       if (w * h < MIN_PX) {
@@ -1670,17 +1673,6 @@ app.post('/api/image', async (req, res) => {
         const newH = Math.ceil(h * scale);
         console.log(`[seedream] auto-scaling ${w}x${h} (${w*h}px) → ${newW}x${newH} (${newW*newH}px) to meet 3.686.400 minimum`);
         w = newW; h = newH;
-      }
-      // Seedream 5.0 Pro deckelt total pixels bei 4.227.072 — bei Überschreitung runterskalieren (4.5/Lite haben höheres Limit)
-      if (model.includes('5-0-pro')) {
-        const MAX_PX = 4227072;
-        if (w * h > MAX_PX) {
-          const scale = Math.sqrt(MAX_PX / (w * h));
-          const capW = Math.floor(w * scale);
-          const capH = Math.floor(h * scale);
-          console.log(`[seedream-pro] capping ${w}x${h} (${w*h}px) → ${capW}x${capH} (${capW*capH}px) to stay under 4.227.072 maximum`);
-          w = capW; h = capH;
-        }
       }
       body.image_size = { width: Math.max(w, 1440), height: Math.max(h, 1440) };
     } else if (model.includes('imagen')) {
