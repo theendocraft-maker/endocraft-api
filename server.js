@@ -256,7 +256,8 @@ ${EMAIL_BTN('https://endocraft.app/free/endocraft-free-pack.zip','Download the F
 <p style="font-size:15px;color:#5c5240;"><i>Inside the ZIP: 5 high-res NPC portraits, 5 cinematic location scenes (tavern, misty road, dungeon, wine cellar, snowbound inn), quick-reference notes &amp; a README on how I&rsquo;d run each one.</i></p>
 <p><b>Two things to know:</b> every asset is reviewed by me before it goes out &mdash; AI does the heavy lifting (Seedream 4.5), I keep the janky hands out. And no newsletter shotgun: a couple more useful emails, then silence. Unsubscribe kills it forever, no hard feelings.</p>
 <p style="margin-top:20px;">Roll high,<br><b>Marco</b></p>
-<div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:20px;"><b>P.S.</b> &mdash; <b>WELCOME10</b> gets you 10% off any premium pack on <a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1" style="color:#8a5e1e;">Etsy</a>. No pressure, just FYI.</div>
+<div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:20px;"><b>Want them to move?</b> &mdash; your free scene is a still. If you&rsquo;d like your character <b>cinematically animated</b> (a short clip for Discord or your stream), I make those to order: <a href="https://www.etsy.com/listing/4536112275?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=custom_cutscene" style="color:#8a5e1e;">Custom Character Cutscene</a>.</div>
+<div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:12px;"><b>P.S.</b> &mdash; <b>WELCOME10</b> gets you 10% off any premium pack on <a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1" style="color:#8a5e1e;">Etsy</a>. No pressure, just FYI.</div>
 `), unsubToken);
 }
 
