@@ -2016,6 +2016,66 @@ app.get('/api/image/proxy', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// TEXT-TO-SPEECH — AIMLAPI (ElevenLabs). Synchron: Text rein, MP3 raus.
+// Nur intern (x-internal-key) — sonst könnte jeder unser AIML-Guthaben verbrennen.
+//   POST /api/tts { text, voice?, model?, stability?, style?, speed? } -> audio/mpeg stream
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/tts', async (req, res) => {
+  try {
+    if (!hasInternalKey(req)) return res.status(403).json({ error: 'forbidden' });
+    const {
+      text,
+      voice = 'Clyde',
+      model = 'elevenlabs/eleven_multilingual_v2',
+      stability = 0.4,
+      style = 0.35,
+      speed = 0.9,
+      similarity_boost = 0.75
+    } = req.body || {};
+    if (!text || !String(text).trim()) return res.status(400).json({ error: 'text required' });
+
+    const r = await fetch('https://api.aimlapi.com/v1/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AIML_KEY}` },
+      body: JSON.stringify({
+        model,
+        text: String(text),
+        voice,
+        output_format: 'mp3_44100_128',
+        apply_text_normalization: 'on',
+        voice_settings: { stability, style, speed, similarity_boost, use_speaker_boost: true }
+      })
+    });
+
+    if (!r.ok) {
+      const errTxt = await r.text().catch(() => '');
+      console.error('[tts] upstream error:', r.status, errTxt.slice(0, 400));
+      return res.status(r.status).json({ error: 'tts upstream failed', detail: errTxt.slice(0, 400) });
+    }
+
+    const ct = r.headers.get('content-type') || '';
+    // Manche Modelle antworten mit JSON { audio: <url> } statt einem Audio-Stream.
+    if (ct.includes('application/json')) {
+      const j = await r.json();
+      const url = j && (j.audio || j.audio_url || (j.data && j.data.audio));
+      if (!url) return res.status(502).json({ error: 'no audio in response', raw: j });
+      const a = await fetch(url);
+      if (!a.ok) return res.status(502).json({ error: 'audio fetch failed' });
+      res.set('Content-Type', a.headers.get('content-type') || 'audio/mpeg');
+      const buf = Buffer.from(await a.arrayBuffer());
+      return res.send(buf);
+    }
+
+    res.set('Content-Type', ct || 'audio/mpeg');
+    const buf = Buffer.from(await r.arrayBuffer());
+    return res.send(buf);
+  } catch (err) {
+    console.error('[tts] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // VIDEO GENERATION — AIMLAPI (Kling image-to-video). Async: create task → poll.
 // Key stays server-side (AIML_API_KEY in Railway). Mirrors the /api/image flow.
 //   POST /api/video         { prompt, image_url, model?, duration?, negative_prompt?, cfg_scale? } -> { id, status }
