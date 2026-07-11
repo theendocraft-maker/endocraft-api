@@ -247,9 +247,9 @@ const EMAIL_TD = (inner) => `<tr><td class="ec-td" style="padding:28px 32px;font
 
 function emailHtml1(unsubToken) {
   return emailHtmlWrap(`<tr><td><a href="https://endocraft.app/free/"><img src="https://endocraft.app/free/shop/free-pack.jpg" width="600" alt="The Free NPC Pack — 5 cinematic D&amp;D portraits" style="width:100%;display:block;border:0;"></a></td></tr>` + EMAIL_TD(`
-<h1 style="font-size:20px;color:#8a5e1e;margin:0 0 16px;">Your cutscene is in the works.</h1>
+<h1 style="font-size:20px;color:#8a5e1e;margin:0 0 16px;">Your character scene is in the works.</h1>
 <p>Hey,</p>
-<p>thanks for signing up &mdash; I&rsquo;m personally crafting a cinematic cutscene of your character. It&rsquo;ll land in your inbox within the next few days.</p>
+<p>thanks for signing up &mdash; I&rsquo;m personally crafting a cinematic scene of your character. It&rsquo;ll land in your inbox within the next few days.</p>
 <p><i>Haven&rsquo;t told me who it should star yet?</i> Just hit reply with a name and a one-line description (e.g. &ldquo;Krull, a scarred half-orc barbarian&rdquo;) and I&rsquo;ll build from it.</p>
 <p><b>While you wait &mdash; here&rsquo;s a free gift:</b> a cinematic starter kit &mdash; 5 NPC portraits + 5 atmospheric location scenes to drop straight into your next session.</p>
 ${EMAIL_BTN('https://endocraft.app/free/endocraft-free-pack.zip','Download the Free Kit',true)}
