@@ -113,8 +113,9 @@ function emailTemplate1Welcome(unsubToken) {
 Thanks for grabbing the free pack.
 
 Inside the ZIP you'll find:
-- 5 high-res NPC portraits (1800x2400 PNG)
-- One quick-reference doc with names, traits, and plot hooks
+- 5 high-res NPC portraits (1800x2400)
+- 5 cinematic location scenes - tavern, misty road, dungeon, wine cellar, snowbound inn
+- Quick-reference notes with names, traits, and plot hooks
 - A README that explains how I'd use each in a session
 
 Two things to know:
@@ -250,9 +251,9 @@ function emailHtml1(unsubToken) {
 <p>Hey,</p>
 <p>thanks for signing up &mdash; I&rsquo;m personally crafting a cinematic cutscene of your character. It&rsquo;ll land in your inbox within the next few days.</p>
 <p><i>Haven&rsquo;t told me who it should star yet?</i> Just hit reply with a name and a one-line description (e.g. &ldquo;Krull, a scarred half-orc barbarian&rdquo;) and I&rsquo;ll build from it.</p>
-<p><b>While you wait &mdash; here&rsquo;s a free gift:</b> a 5-portrait NPC pack to drop straight into your next session.</p>
-${EMAIL_BTN('https://endocraft.app/free/endocraft-free-pack.zip','Download the NPC Pack',true)}
-<p style="font-size:15px;color:#5c5240;"><i>Inside the ZIP: 5 high-res portraits, a quick-reference doc with names, traits &amp; plot hooks, and a README on how I&rsquo;d run each one.</i></p>
+<p><b>While you wait &mdash; here&rsquo;s a free gift:</b> a cinematic starter kit &mdash; 5 NPC portraits + 5 atmospheric location scenes to drop straight into your next session.</p>
+${EMAIL_BTN('https://endocraft.app/free/endocraft-free-pack.zip','Download the Free Kit',true)}
+<p style="font-size:15px;color:#5c5240;"><i>Inside the ZIP: 5 high-res NPC portraits, 5 cinematic location scenes (tavern, misty road, dungeon, wine cellar, snowbound inn), quick-reference notes &amp; a README on how I&rsquo;d run each one.</i></p>
 <p><b>Two things to know:</b> every asset is reviewed by me before it goes out &mdash; AI does the heavy lifting (Seedream 4.5), I keep the janky hands out. And no newsletter shotgun: a couple more useful emails, then silence. Unsubscribe kills it forever, no hard feelings.</p>
 <p style="margin-top:20px;">Roll high,<br><b>Marco</b></p>
 <div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:20px;"><b>P.S.</b> &mdash; <b>WELCOME10</b> gets you 10% off any premium pack on <a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1" style="color:#8a5e1e;">Etsy</a>. No pressure, just FYI.</div>
