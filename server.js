@@ -110,31 +110,25 @@ if (resendActive) console.log('[email] Resend active · sending via REST API');
 function emailTemplate1Welcome(unsubToken) {
   return `Hey,
 
-Thanks for grabbing the free pack.
+Here's your free arrival scene — the carriage on the mist road, the silent village, the castle on the crag, and the lord who's been waiting. Twenty-two seconds, scored and table-ready.
 
-Inside the ZIP you'll find:
-- 5 high-res NPC portraits (1800x2400)
-- 5 cinematic location scenes - tavern, misty road, dungeon, wine cellar, snowbound inn
-- Quick-reference notes with names, traits, and plot hooks
-- A README that explains how I'd use each in a session
+Cue it up the moment your party crosses into the valley, hit play, and let the room go quiet. That's the whole trick.
 
-Two things to know:
+Play / download the scene: https://endocraft.app/free/clips/arrival-cursed-valley.mp4
+(Table-ready 1080p MP4 — drop it into any VTT or slide.)
 
-1. Every face was reviewed by me before going in. AI does the heavy lifting (Seedream 4.5), but I keep the obvious AI tells out — janky hands, weird eyes, that uncanny stare. If you spot one I missed, hit reply and I'll fix it.
+Every frame was reviewed by me before it went out. AI does the heavy lifting, but I keep the obvious tells out — janky hands, weird eyes, that uncanny stare.
 
-2. No newsletter shotgun. I'll send maybe 2-3 more emails — useful D&D things, not "click here to buy". If even that's too much, the unsubscribe at the bottom kills it forever, no hard feelings.
+No newsletter shotgun. I'll send maybe 2-3 more emails — useful D&D things, not "click here to buy". If even that's too much, the unsubscribe at the bottom kills it forever, no hard feelings.
 
-If you've got a sec — what adventure are you running next? I read every reply and use them to decide which packs to build next. Even one word ("Phandelver", "homebrew", "Frostmaiden") helps.
+If you've got a sec — which part of Curse of Strahd are you running next? I read every reply and use them to decide what to build next.
 
 Roll high,
 Marco
 
 ---
 
-P.S. — There's a 10% discount code waiting on the thank-you page (WELCOME10) if you want to grab one of the premium packs. No pressure, just FYI.
-
-Download free pack again: https://endocraft.app/free/endocraft-free-pack.zip
-Browse premium packs on Etsy: https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1
+P.S. — Want your own campaign like this? We build custom arrival scenes, character cutscenes and whole-campaign trailers, made to order. And WELCOME10 gets you 10% off anything on Etsy: https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1
 
 Unsubscribe: https://endocraft-production.up.railway.app/unsubscribe?token=${unsubToken}`;
 }
@@ -246,18 +240,18 @@ const EMAIL_BTN = (href, label, gold) => `<table role="presentation" cellpadding
 const EMAIL_TD = (inner) => `<tr><td class="ec-td" style="padding:28px 32px;font-size:17px;line-height:1.65;color:#2b2318;font-family:'EB Garamond',Georgia,serif;">${inner}</td></tr>`;
 
 function emailHtml1(unsubToken) {
-  return emailHtmlWrap(`<tr><td><a href="https://endocraft.app/free/"><img src="https://endocraft.app/free/shop/free-pack.jpg" width="600" alt="The Free NPC Pack — 5 cinematic D&amp;D portraits" style="width:100%;display:block;border:0;"></a></td></tr>` + EMAIL_TD(`
-<h1 style="font-size:20px;color:#8a5e1e;margin:0 0 16px;">Your character scene is in the works.</h1>
+  return emailHtmlWrap(`<tr><td><a href="https://endocraft.app/free/clips/arrival-cursed-valley.mp4"><img src="https://endocraft.app/free/arrival-poster.jpg" width="600" alt="The Arrival — play your party the valley" style="width:100%;display:block;border:0;"></a></td></tr>` + EMAIL_TD(`
+<h1 style="font-size:20px;color:#8a5e1e;margin:0 0 16px;">Play them the valley.</h1>
 <p>Hey,</p>
-<p>thanks for signing up &mdash; I&rsquo;m personally crafting a cinematic scene of your character. It&rsquo;ll land in your inbox within the next few days.</p>
-<p><i>Haven&rsquo;t told me who it should star yet?</i> Just hit reply with a name and a one-line description (e.g. &ldquo;Krull, a scarred half-orc barbarian&rdquo;) and I&rsquo;ll build from it.</p>
-<p><b>While you wait &mdash; here&rsquo;s a free gift:</b> a cinematic starter kit &mdash; 5 NPC portraits + 5 atmospheric location scenes to drop straight into your next session.</p>
-${EMAIL_BTN('https://endocraft.app/free/endocraft-free-pack.zip','Download the Free Kit',true)}
-<p style="font-size:15px;color:#5c5240;"><i>Inside the ZIP: 5 high-res NPC portraits, 5 cinematic location scenes (tavern, misty road, dungeon, wine cellar, snowbound inn), quick-reference notes &amp; a README on how I&rsquo;d run each one.</i></p>
-<p><b>Two things to know:</b> every asset is reviewed by me before it goes out &mdash; AI does the heavy lifting (Seedream 4.5), I keep the janky hands out. And no newsletter shotgun: a couple more useful emails, then silence. Unsubscribe kills it forever, no hard feelings.</p>
+<p>Here&rsquo;s your free <b>arrival scene</b> &mdash; the carriage on the mist road, the silent village, the castle on the crag, and the lord who&rsquo;s been waiting. Twenty-two seconds, scored and table-ready.</p>
+<p>Cue it up the moment your party crosses into the valley, hit play, and let the room go quiet. That&rsquo;s the whole trick.</p>
+${EMAIL_BTN('https://endocraft.app/free/clips/arrival-cursed-valley.mp4','&#9654;&nbsp; Play / download the scene',true)}
+<p style="font-size:15px;color:#5c5240;text-align:center;"><i>Table-ready 1080p MP4 &middot; drop it into any VTT or slide.</i></p>
+<p><b>Every frame was reviewed by me</b> before it went out &mdash; AI does the heavy lifting, I keep the janky hands and uncanny stares out. And no newsletter shotgun: a couple more useful emails, then quiet. Unsubscribe kills it forever, no hard feelings.</p>
+<p>If you&rsquo;ve got a sec &mdash; <b>which part of Curse of Strahd are you running next?</b> I read every reply, and it tells me what to build next.</p>
 <p style="margin-top:20px;">Roll high,<br><b>Marco</b></p>
-<div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:20px;"><b>Want them to move?</b> &mdash; your free scene is a still. If you&rsquo;d like your character <b>cinematically animated</b> (a short clip for Discord or your stream), I make those to order: <a href="https://www.etsy.com/listing/4536112275?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=custom_cutscene" style="color:#8a5e1e;">Custom Character Cutscene</a>.</div>
-<div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:12px;"><b>P.S.</b> &mdash; <b>WELCOME10</b> gets you 10% off any premium pack on <a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1" style="color:#8a5e1e;">Etsy</a>. No pressure, just FYI.</div>
+<div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:20px;"><b>Want your own campaign like this?</b> &mdash; we build custom arrival scenes, character cutscenes &amp; whole-campaign trailers, made to order: <a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=made_to_order" style="color:#8a5e1e;">see what we make</a>.</div>
+<div style="background:#f3e4c2;border-left:4px solid #d8b46a;padding:12px 16px;font-size:15px;margin-top:12px;"><b>P.S.</b> &mdash; <b>WELCOME10</b> gets you 10% off anything on <a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_1" style="color:#8a5e1e;">Etsy</a>. No pressure, just FYI.</div>
 `), unsubToken);
 }
 
@@ -292,7 +286,7 @@ async function sendWelcomeEmail(emailNumber, lead) {
     return { ok: true, skipped: true };
   }
   const subjects = {
-    1: 'Your D&D NPC pack is ready (and what\'s inside)',
+    1: 'Your free cinematic arrival scene is ready',
     2: 'A free boss for your table. He is in no hurry.',
     3: 'If you\'re prepping Curse of Strahd next...'
   };
