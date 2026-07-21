@@ -168,7 +168,7 @@ function emailTemplate3CoSHint(unsubToken) {
 
 Last email from me for a while (I promised — 2-3 mails max).
 
-A few people who grabbed the free pack told me they're running Curse of Strahd. So if that's you, here's what I built for it.
+You grabbed the arrival scene, so odds are you're running Curse of Strahd — or about to. Here's what I built for exactly that campaign.
 
 The Curse of Strahd Master Pack has 39 assets:
 
@@ -199,7 +199,7 @@ https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_emai
 
 If you're NOT prepping CoS, ignore this and good luck with whatever you're running. The Phandelver and Storm King packs are in the shop too.
 
-Either way — thanks for grabbing the free pack. I hope at least one of those five NPCs ends up at your table.
+Either way — thanks for grabbing the arrival scene. I hope it buys you one perfect moment of silence at the table.
 
 Roll high,
 Marco
@@ -270,11 +270,11 @@ ${EMAIL_BTN('https://endocraft.app/free/sluglord/?utm_source=endocraft&utm_mediu
 function emailHtml3(unsubToken) {
   return emailHtmlWrap(`<tr><td><a href="https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_3_cos"><img src="https://endocraft.app/free/shop/cos-master.jpg" width="600" alt="Curse of Strahd Master Pack — 39 cinematic D&amp;D assets" style="width:100%;display:block;border:0;"></a></td></tr>` + EMAIL_TD(`
 <h1 style="font-size:20px;color:#8a5e1e;margin:0 0 16px;">Last email for a while &mdash; as promised.</h1>
-<p>A few people told me they&rsquo;re running <b>Curse of Strahd</b>. If that&rsquo;s you, here&rsquo;s what I built for it.</p>
+<p>You grabbed the arrival scene, so odds are you&rsquo;re running <b>Curse of Strahd</b> &mdash; or about to. Here&rsquo;s what I built for exactly that campaign.</p>
 <p>The <b>CoS Master Pack</b>: 39 assets &mdash; 12 NPC portraits (Strahd, Ireena, Madam Eva, Van Richten &hellip;), 8 locations (Castle Ravenloft, Svalich Road &hellip;), 4 grid battle maps, 2 magic items, 13 mood pieces. Roll20, Foundry &amp; Owlbear ready. $14.99 &mdash; less than a single VTT subscription month.</p>
 <p>I built it because on my first CoS table I wasted three sessions hunting for art that didn&rsquo;t look like 2015 stock photos. This is what I wish I&rsquo;d had on day one.</p>
 ${EMAIL_BTN('https://www.etsy.com/shop/EndoCraft?utm_source=endocraft&utm_medium=welcome_email&utm_campaign=email_3_cos','See the Pack on Etsy — WELCOME10 for 10% off',false)}
-<p>Not running CoS? Ignore this and good luck with whatever you&rsquo;re running. Either way &mdash; thanks for grabbing the free pack.</p>
+<p>Not running CoS after all? Ignore this and good luck with whatever you&rsquo;re running. Either way &mdash; thanks for grabbing the arrival scene.</p>
 <p style="margin-top:20px;">Roll high,<br><b>Marco</b></p>
 `), unsubToken);
 }
@@ -4474,7 +4474,7 @@ app.get('/unsubscribe', async (req, res) => {
         <h1>You're unsubscribed.</h1>
         <p>No more emails from EndoCraft.</p>
         <p>No hard feelings — sometimes the inbox just gets full.</p>
-        <p style="font-size:14px;opacity:0.65;margin-top:18px">If you ever change your mind, the free pack is always at endocraft.app/free.</p>
+        <p style="font-size:14px;opacity:0.65;margin-top:18px">If you ever change your mind, the free scene is always at endocraft.app/free.</p>
         <div class="signature">— Marco</div>
         <div class="divider"></div>
         <a class="back-link" href="https://endocraft.app/">Return to EndoCraft</a>
